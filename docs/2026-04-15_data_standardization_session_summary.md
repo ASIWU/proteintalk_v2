@@ -2,7 +2,7 @@
 
 ## 背景
 
-本轮工作基于 [data/Data_Process.md](/mnt/shared-storage-gpfs2/beam-gpfs02/wuhao/PTV/proteintalk_v2/data/Data_Process.md:1) 的第一阶段要求，目标是对 `data/rawdata/` 下的原始数据做逐文件梳理、标准化，并产出可复现的 task-level 输入与全局 meta。
+本轮工作基于 [data/Data_Process.md](/mnt/shared-storage-gpfs2/beam-gpfs02/wuhao/PTV/proteintalk_v2/docs/Data_Process.md:1) 的第一阶段要求，目标是对 `data/rawdata/` 下的原始数据做逐文件梳理、标准化，并产出可复现的 task-level 输入与全局 meta。
 
 本轮已经完成第一版可运行实现，并产出了标准化结果到 `data/standardized/`。
 
