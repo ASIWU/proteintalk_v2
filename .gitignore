@@ -16,3 +16,4 @@ env/
 
 # Data outputs and temp files
 data
+.codex
