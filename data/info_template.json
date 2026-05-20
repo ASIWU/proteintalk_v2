@@ -1,0 +1,22 @@
+{
+    "sample_id":"no",
+    "machineID_new":"no",
+    "Cell_plate":"no",
+    "Cell":"no",
+    "cell_type":"no",
+    "pert_id1":"no",
+    "pert_id2":"no",
+    "batch":"no",
+    "pert_time":"0",
+    "pert_dose1":"0",
+    "pert_dose2":"0",
+    "PRISM1st_label_total":"no",
+    "PRISM2nd_label_total":"no",
+    "instrument":"no",
+    "cell_pertid_time":"no",
+    "drugname":"no",
+    "smiles":"no",
+    "target_protein_list":"no",
+    "control":"no",
+    "synergy":"no" 
+}

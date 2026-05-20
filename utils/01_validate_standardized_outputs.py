@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import pickle
+import re
 from pathlib import Path
 
 import numpy as np
@@ -33,6 +34,16 @@ def read_npy_shape(path: Path) -> tuple[int, ...]:
     return shape
 
 
+def parse_uniprot_token(token: str) -> bool:
+    token = token.strip()
+    return bool(
+        re.fullmatch(r"[OPQ][0-9][A-Z0-9]{3}[0-9]", token)
+        or re.fullmatch(r"[A-NR-Z][0-9][A-Z0-9]{3}[0-9]", token)
+        or re.fullmatch(r"[A-NR-Z][0-9](?:[A-Z0-9]{3}[0-9]){2}", token)
+        or re.fullmatch(r"A0A[A-Z0-9]{7}", token)
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Validate standardized ProteinTalk outputs")
     parser.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
@@ -55,12 +66,34 @@ def main() -> None:
 
         if len(info_df) != matrix_shape[0]:
             failures.append(f"{task_name}: info rows {len(info_df)} != matrix rows {matrix_shape[0]}")
+        if info_df["sample_id"].duplicated(keep=False).any():
+            duplicated = info_df.loc[info_df["sample_id"].duplicated(keep=False), "sample_id"].astype(str).unique().tolist()
+            failures.append(f"{task_name}: duplicated sample_id values in info.csv: {duplicated[:10]}")
         if len(protein_order) != matrix_shape[1]:
             failures.append(f"{task_name}: protein order {len(protein_order)} != matrix cols {matrix_shape[1]}")
+        if len(protein_order) != len(set(protein_order)):
+            duplicated = [protein for protein in protein_order if protein_order.count(protein) > 1]
+            failures.append(f"{task_name}: duplicated UniProt IDs in protein order: {sorted(set(duplicated))[:10]}")
+        invalid_proteins = [protein for protein in protein_order if not parse_uniprot_token(protein)]
+        if invalid_proteins:
+            failures.append(f"{task_name}: invalid UniProt IDs in protein order: {invalid_proteins[:10]}")
         if len(sample_ids) != matrix_shape[0]:
             failures.append(f"{task_name}: sample_ids {len(sample_ids)} != matrix rows {matrix_shape[0]}")
+        if len(sample_ids) != len(set(sample_ids)):
+            duplicates = [sample_id for sample_id in sample_ids if sample_ids.count(sample_id) > 1]
+            failures.append(f"{task_name}: duplicated sample_ids in sample_ids.json: {sorted(set(duplicates))[:10]}")
         if len(index_map) != matrix_shape[0]:
             failures.append(f"{task_name}: index map {len(index_map)} != matrix rows {matrix_shape[0]}")
+        if "doubledrug" in task_name:
+            if "synergy" not in info_df.columns:
+                failures.append(f"{task_name}: missing synergy column in info.csv")
+            else:
+                synergy = info_df["synergy"]
+                synergy_non_empty = synergy.notna()
+                if synergy.dtype == object:
+                    synergy_non_empty = synergy.fillna("").astype(str).str.strip() != ""
+                if not synergy_non_empty.any():
+                    failures.append(f"{task_name}: synergy column is present but all values are empty")
 
         if expr.get("expression_dict_materialized"):
             dict_path = Path(expr["expression_dict_path"])

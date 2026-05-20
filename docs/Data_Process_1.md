@@ -67,7 +67,9 @@
    - 缺失值填补规则
    - 是否需要统一大小写
    - 是否需要去空格、去分隔符噪音、标准化分号或逗号
-3. 单药数据中不存在的第二药物字段，也必须保留统一列，但按规则填默认值。
+3. 单药数据中不存在独立第二药物时，也必须保留统一列；`pert_id2`
+   不能填空或 `"no"`，必须复制 `pert_id1`，使 single-drug 和 double-drug
+   都能进入同一个 two-slot perturbation input。
 4. 任何映射关系都不能凭猜测完成，必须逐文件确认。
 
 建议至少统一并明确以下字段：
@@ -141,6 +143,42 @@
 ### PTV1
 
 `PTV1` 数据集必须与其他数据隔离处理，不能混入同一套索引空间或样本集合，除非后续任务明确要求合并。
+
+当前 `PTV1` 需要进一步拆成两个 task 来源：
+
+1. `data/rawdata/ptv1/`
+   主 `PTV1` 数据。`aivc.csv` 是 info + expression 混合表，`aivc_info.csv` 是其样本信息投影。
+2. `data/rawdata/ptv1_extra_singledrug/`
+   `PTV1` 的额外单药验证数据，只提供 label / cell / drug 映射，不提供 perturbation proteome matrix。
+
+`PTV1` 主数据的额外规则：
+
+1. `NY_label -> PRISM1st_label_total`
+2. `Library_dose -> pert_dose1`
+3. `Anchor_dose -> pert_dose2`
+4. `pert_id -> pert_id1`
+5. `Anchor_id -> pert_id2`
+6. `smiles` 和 `target_protein_list` 需要从 `data/rawdata/ptv1/ptv1.csv` 读取，并按 `pert_id1 / pert_id2` 合并
+7. `control` 的定义不同于 `PTV3`：
+   - 只有 `pert_time == 0` 的行是 control 行
+   - perturbed row 需要在相同 `(protein_plate, BioRep)` 内找到 control
+8. 如果同一个 `(protein_plate, BioRep)` 下存在多个合法 control 行，代码里不能静默忽略，必须记录 candidate 数量；当前可以采用任意确定性的代表 control，但该 control 必须满足 `pert_time == 0`
+
+`PTV1 extra singledrug` 的额外规则：
+
+1. 以 `test12091214_sample_predictions_E115id.csv` 为主样本表，至少读取：
+   - `ground_truth`
+   - `cell`
+   - `E115_id`
+2. 对这个文件先做 `unique(cell, E115_id)` 去重
+3. `ground_truth` 以 `model == "ppODE_swa1"` 的那一行为准
+4. 如果某个 `(cell, E115_id)` 没有 `ppODE_swa1` 行，代码需要记录这个问题，但不能静默改规则
+5. baseline proteome 只能从 `aivc.csv` / `aivc_info.csv` 的 control 行中补齐，匹配键是：
+   - `test12091214_sample_predictions_E115id.csv.cell`
+   - 对应 `aivc` 中的 `protein_plate`
+6. `E115_id` 直接作为 `pert_id`
+7. `smiles` 和 `target_protein_list` 不从 `PTV1` 本地药物表推断，而是从 `PTV3 global_meta.json` 读取
+8. 即使其他 model 行的 `ground_truth` 与 `ppODE_swa1` 不一致，也不删除该 `(cell, E115_id)` 样本；只把冲突记录到审计信息
 
 ## 代码产出要求
 

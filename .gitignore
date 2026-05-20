@@ -1,9 +1,21 @@
-fixclasses/
+# OS and editor noise
 .DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
 
-# Python
+# Local agent / scratch files
+.codex
+.agents/
+fixclasses/
+=10.1
+
+# Python caches and environments
 __pycache__/
 *.py[cod]
+*$py.class
 *.so
 .Python
 .pytest_cache/
@@ -13,7 +25,73 @@ __pycache__/
 .venv/
 venv/
 env/
+ENV/
+.env
+.env.*
+!.env.example
 
-# Data outputs and temp files
-data
-.codex
+# Build and packaging artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Project data: ignore datasets by default, keep lightweight docs/templates.
+/data/*
+!/data/*.md
+!/data/info_template.json
+!/data/review_summary/
+!/data/review_summary/**
+
+# Training, inference, and experiment outputs
+/checkpoints/
+/logs/
+/outputs/
+/lightning_logs/
+/runs/
+/wandb/
+/mlruns/
+
+# Model checkpoints and serialized artifacts
+*.ckpt
+*.pt
+*.pth
+*.safetensors
+*.onnx
+*.pb
+*.bin
+*.pkl
+*.pickle
+*.joblib
+
+# Large array/table artifacts
+*.npy
+*.npz
+*.h5
+*.hdf5
+*.parquet
+*.feather
+*.arrow
+
+# Raw data tables and archives
+*.csv
+*.tsv
+*.xlsx
+*.xls
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.gz
+*.bz2
+*.xz
+*.7z
+*.rar
+
+# Runtime logs
+*.log
+*.out
+*.err
+nohup.out
+slurm-*.out
