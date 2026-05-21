@@ -1241,3 +1241,27 @@ python utils/01_validate_standardized_outputs.py
 - 当前确认 fold0/fold1 manifest 为 `fit_completed` 且 `test_completed`，fold2 manifest 停在 `fit_started`，runtime summary 中 fold2 exit status 为 `137`。
 - `train.py --checkpoint-path` 只加载模型权重，不会恢复 Lightning trainer epoch/optimizer 状态；因此新脚本默认把未完成的 fold2 checkpoint/log/output 目录移动到 `_archived_failed_restarts/` 后，用同一实验名前缀从 fold2 重新训练，再继续 fold3/fold4。
 - double 5-fold 完成后，脚本继续执行原 `0513_1.sh` 后续两段：`exp_08_extra_double_all_train_infer` 和 `exp_05_single_no_pdi_5fold`；默认超参数保持 `0513_1.sh` 的 `loss2` checkpoint selection、double batch size 64、single no-pdi batch size 128。
+
+## 2026-05-21 11:58 HKT New Version GraphJump and PCEP Iteration
+
+- 在 `new_version` 中新增两类可开关结构：
+  - `PCEP`：低开销逐蛋白 expression/protein-embedding pooling，用于恢复一定逐蛋白可解释性；
+  - multi-hop graph feature 与 selective jump fusion：在离线 graph cache 中加入 `PDI-PPI^2`、`DDI^2`、`DDI-PDI`、`DDI-PDI-PPI` 等多跳上下文，并支持 softmax/sparsemax gate 选择不同 graph blocks。
+- 修改范围：
+  - `new_version/graph_feature_utils.py`
+  - `new_version/fast_delta_model.py`
+  - `new_version/train.py`
+  - `new_version/run_single_unseen_sweep.sh`
+  - `new_version/run_single_unseen_5fold.sh`
+- 验证：
+  - `python -m py_compile` 通过；
+  - 单 GPU dry run 通过；
+  - 2 GPU DDP smoke fit/test 通过；
+  - 完成两轮 2 GPU、50 epoch、5-fold real/zero sweep，共 40 个完整 runs。
+- 结果：
+  - baseline3 仍最佳：AUPRC `0.656369`，AUROC `0.900316`，graph gap `+0.057573`；
+  - baseline3 + PCEP：AUPRC `0.651715`，AUROC `0.899814`，graph gap `+0.059653`；
+  - selective multi-hop sparse jump：AUPRC `0.619492`；
+  - selective multi-hop sparse jump + PCEP：AUPRC `0.623436`；
+  - multihop concat：AUPRC `0.612670`。
+- 结论：标准 baseline 暂不替换，继续使用 `graph128_struct_drugcat_logit2_no_pos`；PCEP 可作为解释性 ablation 保留；当前 multi-hop/selective jump 版本不建议升为主模型。

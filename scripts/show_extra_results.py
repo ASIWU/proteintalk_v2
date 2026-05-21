@@ -13,7 +13,7 @@ from statistics import mean
 from typing import Any
 
 
-DEFAULT_OUTPUT_DIR = Path("outputs/20260510_extra_single_all_train_infer_all_single_for_extra")
+DEFAULT_OUTPUT_DIR = Path("outputs/20260513_extra_double_all_train_infer_all_single_double_for_extra")
 METRIC_KEYS = ("auroc", "auprc", "acc")
 COUNT_KEYS = ("valid_count", "positive_count", "negative_count")
 DEFAULT_COLUMNS = (
