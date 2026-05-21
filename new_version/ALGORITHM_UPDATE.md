@@ -430,10 +430,77 @@ Use two GPUs only when keeping the exact existing two-GPU recipe is more
 important than GPU efficiency, or when running multiple folds in parallel by
 assigning one fold per GPU.
 
+## 2026-05-21 baseline4 single-GPU ablation
+
+Based on the timing check above, `baseline3 + PCEP` was promoted to
+`baseline4` for a matched single-GPU recipe:
+
+- one GPU per run (`--devices 1`);
+- `batch_size=256`, matching the previous two-GPU global batch size;
+- PPI + PDI + DDI compressed graph feature enabled;
+- PCEP enabled with `protein_concat_dim=64` and `protein_concat_topk=512`;
+- `mse_weight=0.25`, `positive_weight=none`, target protein length 32.
+
+A new launcher was added:
+
+- `new_version/run_baseline4_1gpu_parallel.sh`
+
+It runs one single-GPU experiment per process and assigns jobs across
+`GPU_IDS=0,1`, so the two H200 GPUs are used as two independent workers rather
+than as DDP ranks.
+
+Full `ptv3_main_singledrug` `pert_stratified_5fold` results at
+`gpu=1, batch_size=256, max_epochs=50`:
+
+| method | AUPRC | AUROC | ACC | fit seconds/fold |
+| --- | ---: | ---: | ---: | ---: |
+| baseline1 `no_pos` | 0.600407 | 0.830623 | 0.915606 | 40.6 |
+| baseline2 `graph128_no_pos` | 0.602530 | 0.851481 | 0.913622 | 41.2 |
+| baseline3 `graph128_struct_drugcat_logit2_no_pos` | 0.656369 | 0.900316 | 0.917409 | 41.0 |
+| baseline4 `baseline3 + PCEP`, `mse_weight=0.25` | 0.666491 | 0.903489 | 0.915167 | 41.8 |
+| baseline4 w/o graph feature | 0.561250 | 0.835845 | 0.912883 | 42.0 |
+| baseline4 w/o MSE loss | 0.644541 | 0.888019 | 0.913273 | 41.2 |
+
+Baseline4 ablation conclusions:
+
+- Graph feature contribution is strong under the final single-GPU setting:
+  baseline4 minus w/o graph is `+0.105241` AUPRC and `+0.067644` AUROC.
+- The MSE auxiliary loss remains useful: baseline4 minus w/o MSE is
+  `+0.021950` AUPRC and `+0.015470` AUROC.
+- Against baseline3, baseline4 improves AUPRC by `+0.010122` and AUROC by
+  `+0.003173` while using one GPU per run.
+- Against the user-provided 8-GPU reference, baseline4 improves AUPRC by
+  `+0.110191` and AUROC by `+0.089109`.
+
+An MSE-weight sweep was also run under the same single-GPU baseline4 recipe,
+with real graph features enabled:
+
+| mse_weight | AUPRC | AUROC | ACC | fit seconds/fold |
+| ---: | ---: | ---: | ---: | ---: |
+| 0.05 | 0.649057 | 0.887431 | 0.915543 | 42.4 |
+| 0.10 | 0.656212 | 0.898468 | 0.916110 | 42.4 |
+| 0.25 | 0.666491 | 0.903489 | 0.915167 | 41.8 |
+| 0.50 | 0.658686 | 0.893493 | 0.912557 | 41.4 |
+
+`mse_weight=0.25` is retained for baseline4 because it has the best 5-fold mean
+AUPRC and AUROC among the tested values.
+
 ## Recommendation
 
-Use `graph128_struct_drugcat_logit2_no_pos` as the default unseen single-drug
-recipe:
+Use baseline4 as the default unseen single-drug recipe when one-GPU-per-fold
+parallelism is acceptable:
+
+```bash
+EXP_PREFIX=baseline4_b256 \
+GPU_IDS=0,1 \
+METHODS="baseline4 baseline4_zero baseline4_no_mse" \
+BATCH_SIZE=256 \
+MAX_EPOCHS=50 \
+bash new_version/run_baseline4_1gpu_parallel.sh
+```
+
+Use `graph128_struct_drugcat_logit2_no_pos` as the fallback recipe when matching
+the earlier two-GPU DDP baseline3 exactly:
 
 ```bash
 GPU_IDS=0,1 \
@@ -458,7 +525,8 @@ EXP_PREFIX=graphboost_confirm \
 bash new_version/run_single_unseen_sweep.sh
 ```
 
-Current conclusion: the new version is already practical on two GPUs for
-iteration, explicitly uses PPI + PDI + DDI, and does not require 8 GPUs for
-capacity. The 8-GPU run is still useful only if the final report must match the
-user's standard execution policy.
+Current conclusion: baseline4 is the strongest tested unseen single-drug
+configuration. It explicitly uses PPI + PDI + DDI, keeps PCEP for lightweight
+per-protein expression/embedding interaction, has a large graph ablation gap,
+and runs efficiently with one GPU per fold. The 8-GPU run is still useful only
+if the final report must match the user's standard execution policy.

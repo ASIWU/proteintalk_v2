@@ -1265,3 +1265,21 @@ python utils/01_validate_standardized_outputs.py
   - selective multi-hop sparse jump + PCEP：AUPRC `0.623436`；
   - multihop concat：AUPRC `0.612670`。
 - 结论：标准 baseline 暂不替换，继续使用 `graph128_struct_drugcat_logit2_no_pos`；PCEP 可作为解释性 ablation 保留；当前 multi-hop/selective jump 版本不建议升为主模型。
+
+## 2026-05-21 14:46 HKT Baseline4 Single-GPU PCEP Ablation
+
+- 将 `baseline3 + PCEP` 定义为 `baseline4`，并新增 `new_version/run_baseline4_1gpu_parallel.sh`。
+- 新脚本按 `GPU_IDS=0,1` 启动两个独立单卡 worker，每个实验使用 `--devices 1`、`batch_size=256`，用于在两张 GPU 上并行跑不同 fold/ablation，而不是用 DDP 跑同一个 fold。
+- 完成 `ptv3_main_singledrug`、`pert_stratified_5fold`、50 epoch 的完整 5-fold：
+  - baseline4：AUPRC `0.666491`，AUROC `0.903489`，ACC `0.915167`，fit `41.8s/fold`；
+  - baseline4 w/o graph feature：AUPRC `0.561250`，AUROC `0.835845`，ACC `0.912883`，fit `42.0s/fold`；
+  - baseline4 w/o MSE loss：AUPRC `0.644541`，AUROC `0.888019`，ACC `0.913273`，fit `41.2s/fold`。
+- Ablation 结论：
+  - graph feature 贡献 `+0.105241` AUPRC、`+0.067644` AUROC；
+  - MSE auxiliary loss 贡献 `+0.021950` AUPRC、`+0.015470` AUROC。
+- 额外完成 `mse_weight` sweep：
+  - `0.05`: AUPRC `0.649057`，AUROC `0.887431`；
+  - `0.10`: AUPRC `0.656212`，AUROC `0.898468`；
+  - `0.25`: AUPRC `0.666491`，AUROC `0.903489`；
+  - `0.50`: AUPRC `0.658686`，AUROC `0.893493`。
+- 结论：`mse_weight=0.25` 保持为 baseline4；baseline4 相比 baseline3 AUPRC `+0.010122`、AUROC `+0.003173`，同时支持一张 GPU 一个 fold 的高效并行。
