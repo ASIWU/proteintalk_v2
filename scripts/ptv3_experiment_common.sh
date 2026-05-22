@@ -14,25 +14,49 @@ fi
 
 PYTHON_BIN="${PYTHON_BIN:-/mnt/shared-storage-user/wuhao/miniconda3/envs/flow_v2/bin/python}"
 
+WANDB_ENV_FILE="${WANDB_ENV_FILE:-${REPO_ROOT}/scripts/wandb_env.local}"
+if [[ -f "${WANDB_ENV_FILE}" ]]; then
+  set -a
+  # shellcheck source=/dev/null
+  source "${WANDB_ENV_FILE}"
+  set +a
+fi
+export WANDB_BASE_URL="${WANDB_BASE_URL:-http://100.96.30.112:8080}"
+export WANDB_API_KEY="${WANDB_API_KEY:-local-f401d2b9276fb4a6dd1db4c1efee0512723ce6fb}"
+
 GPU_IDS="${GPU_IDS:-0,1,2,3,4,5,6,7}"
-DEVICES="${DEVICES:-8}"
-PRECISION="${PRECISION:-32-true}"
-NUM_WORKERS="${NUM_WORKERS:-0}"
-BATCH_SIZE="${BATCH_SIZE:-16}"
-INFER_BATCH_SIZE="${INFER_BATCH_SIZE:-16}"
+DEVICES="${DEVICES:-1}"
+STRATEGY="${STRATEGY:-auto}"
+PRECISION="${PRECISION:-bf16-mixed}"
+NUM_WORKERS="${NUM_WORKERS:-4}"
+BATCH_SIZE="${BATCH_SIZE:-256}"
+INFER_BATCH_SIZE="${INFER_BATCH_SIZE:-256}"
 MAX_EPOCHS="${MAX_EPOCHS:-50}"
-LEARNING_RATE="${LEARNING_RATE:-1e-4}"
-HIDDEN_DIM="${HIDDEN_DIM:-256}"
+LEARNING_RATE="${LEARNING_RATE:-3e-4}"
+MODEL_TYPE="${MODEL_TYPE:-fast_delta}"
+HIDDEN_DIM="${HIDDEN_DIM:-384}"
+EXPRESSION_LATENT_DIM="${EXPRESSION_LATENT_DIM:-512}"
+COVARIATE_EMBEDDING_DIM="${COVARIATE_EMBEDDING_DIM:-64}"
 NUM_HEADS="${NUM_HEADS:-8}"
 NUM_LAYERS="${NUM_LAYERS:-4}"
-DROPOUT="${DROPOUT:-0.1}"
+DROPOUT="${DROPOUT:-0.15}"
+CONTROL_LAYERS="${CONTROL_LAYERS:-2}"
+FUSION_LAYERS="${FUSION_LAYERS:-3}"
+TARGET_LAYERS="${TARGET_LAYERS:-2}"
 GRADIENT_CLIP_VAL="${GRADIENT_CLIP_VAL:-1.0}"
 OPTIMIZER_NAME="${OPTIMIZER_NAME:-adamw}"
-SCHEDULER_NAME="${SCHEDULER_NAME:-}"
-MSE_WEIGHT="${MSE_WEIGHT:-1.0}"
+SCHEDULER_NAME="${SCHEDULER_NAME:-cosine}"
+WEIGHT_DECAY="${WEIGHT_DECAY:-1e-4}"
+MSE_WEIGHT="${MSE_WEIGHT:-0.25}"
 BCE_WEIGHT="${BCE_WEIGHT:-}"
-POSITIVE_WEIGHT="${POSITIVE_WEIGHT:-}"
+POSITIVE_WEIGHT="${POSITIVE_WEIGHT:-none}"
 FOCAL_LOSS="${FOCAL_LOSS:-0}"
+LABEL_SMOOTHING="${LABEL_SMOOTHING:-0.0}"
+MSE_INACTIVE_LABEL_WEIGHT="${MSE_INACTIVE_LABEL_WEIGHT:-1.0}"
+MSE_GENE_SUBSAMPLE="${MSE_GENE_SUBSAMPLE:-0}"
+ACTIVE_LABEL_SAMPLING_WEIGHT="${ACTIVE_LABEL_SAMPLING_WEIGHT:-1.0}"
+POSITIVE_LABEL_SAMPLING_WEIGHT="${POSITIVE_LABEL_SAMPLING_WEIGHT:-1.0}"
+INACTIVE_LABEL_TRAIN_RATIO="${INACTIVE_LABEL_TRAIN_RATIO:--1.0}"
 LIMIT_TRAIN_BATCHES="${LIMIT_TRAIN_BATCHES:-1.0}"
 LIMIT_VAL_BATCHES="${LIMIT_VAL_BATCHES:-1.0}"
 LIMIT_TEST_BATCHES="${LIMIT_TEST_BATCHES:-1.0}"
@@ -46,12 +70,12 @@ INFER_DEVICE="${INFER_DEVICE:-cuda:0}"
 RUN_INFERENCE="${RUN_INFERENCE:-1}"
 SAVE_EVERY_N_EPOCHS="${SAVE_EVERY_N_EPOCHS:-1}"
 SAVE_EVERY_N_TRAIN_STEPS="${SAVE_EVERY_N_TRAIN_STEPS:-}"
-SAVE_TOP_K="${SAVE_TOP_K:--1}"
+SAVE_TOP_K="${SAVE_TOP_K:-1}"
 SAVE_LAST_CKPT="${SAVE_LAST_CKPT:-1}"
 CHECKPOINT_FILENAME="${CHECKPOINT_FILENAME:-}"
 BEST_CKPT_METRIC="${BEST_CKPT_METRIC:-valid_auprc}"
 REFERENCE_5FOLD_CKPT_PATH="${REFERENCE_5FOLD_CKPT_PATH:-}"
-REFERENCE_EPOCH_AGG="${REFERENCE_EPOCH_AGG:-median}"
+REFERENCE_EPOCH_AGG="${REFERENCE_EPOCH_AGG:-mean}"
 REFERENCE_EPOCH_ROUNDING="${REFERENCE_EPOCH_ROUNDING:-nearest}"
 REFERENCE_EPOCH_MIN_COUNT="${REFERENCE_EPOCH_MIN_COUNT:-5}"
 REFERENCE_REQUIRE_TEST_COMPLETED="${REFERENCE_REQUIRE_TEST_COMPLETED:-1}"
@@ -64,8 +88,8 @@ if [[ -n "${SAVE_EVERY_N_TRAIN_STEPS}" && -z "${USER_SET_MONITOR}" ]]; then
   MONITOR="none"
 fi
 MONITOR_MODE="${MONITOR_MODE:-}"
-LOGGER_BACKEND="${LOGGER_BACKEND:-tensorboard}"
-LOG_TO_WANDB="${LOG_TO_WANDB:-0}"
+LOGGER_BACKEND="${LOGGER_BACKEND:-wandb}"
+LOG_TO_WANDB="${LOG_TO_WANDB:-1}"
 WANDB_PROJECT="${WANDB_PROJECT:-aivc_proteintalk}"
 WANDB_ENTITY="${WANDB_ENTITY:-}"
 WANDB_GROUP="${WANDB_GROUP:-}"
@@ -76,26 +100,68 @@ LOG_EVERY_N_STEPS="${LOG_EVERY_N_STEPS:-1}"
 CHECK_VAL_EVERY_N_EPOCH="${CHECK_VAL_EVERY_N_EPOCH:-1}"
 ALLOW_NONFINITE_MONITOR="${ALLOW_NONFINITE_MONITOR:-0}"
 RUN_PREFLIGHT="${RUN_PREFLIGHT:-1}"
+RUN_DATA_VALIDATION="${RUN_DATA_VALIDATION:-0}"
 ALLOW_EXISTING_RUN="${ALLOW_EXISTING_RUN:-0}"
 TIME_SUMMARY_PATH="${TIME_SUMMARY_PATH:-${LOG_DIR}/${EXP_PREFIX}_runtime_summary.tsv}"
+TARGET_PROTEIN_MAX_LENGTH="${TARGET_PROTEIN_MAX_LENGTH:-32}"
+GRAPH_FEATURE_MODE="${GRAPH_FEATURE_MODE:-real}"
+GRAPH_FEATURE_DIM="${GRAPH_FEATURE_DIM:-128}"
+GRAPH_FEATURE_SEED="${GRAPH_FEATURE_SEED:-17}"
+GRAPH_STRUCTURAL_RP="${GRAPH_STRUCTURAL_RP:-1}"
+GRAPH_MULTIHOP="${GRAPH_MULTIHOP:-0}"
+GRAPH_CACHE_DIR="${GRAPH_CACHE_DIR:-graph_cache}"
+GRAPH_LAYERS="${GRAPH_LAYERS:-2}"
+GRAPH_INIT_SCALE="${GRAPH_INIT_SCALE:-0.1}"
+GRAPH_DRUG_CONCAT="${GRAPH_DRUG_CONCAT:-1}"
+GRAPH_PAIR_ADD_SCALE="${GRAPH_PAIR_ADD_SCALE:-0.0}"
+GRAPH_LOGIT_SCALE="${GRAPH_LOGIT_SCALE:-2.0}"
+GRAPH_JUMP_FUSION="${GRAPH_JUMP_FUSION:-concat}"
+GRAPH_JUMP_GATE="${GRAPH_JUMP_GATE:-softmax}"
+GRAPH_JUMP_TEMPERATURE="${GRAPH_JUMP_TEMPERATURE:-1.0}"
+PAIR_FUSION_MODE="${PAIR_FUSION_MODE:-symmetric}"
+PAIR_TYPE_FEATURES="${PAIR_TYPE_FEATURES:-0}"
+PROTEIN_CONCAT_MODE="${PROTEIN_CONCAT_MODE:-pcep}"
+PROTEIN_CONCAT_DIM="${PROTEIN_CONCAT_DIM:-64}"
+PROTEIN_CONCAT_TOPK="${PROTEIN_CONCAT_TOPK:-512}"
+PROTEIN_CONCAT_INIT_SCALE="${PROTEIN_CONCAT_INIT_SCALE:-0.1}"
+PROTEIN_CONCAT_SEED="${PROTEIN_CONCAT_SEED:-23}"
+CONTROL_LOGIT_SCALE="${CONTROL_LOGIT_SCALE:-0.0}"
+PAIR_LOGIT_SCALE="${PAIR_LOGIT_SCALE:-0.0}"
+TARGET_LOGIT_SCALE="${TARGET_LOGIT_SCALE:-0.0}"
+COVARIATE_LOGIT_SCALE="${COVARIATE_LOGIT_SCALE:-0.0}"
+USE_DDI="${USE_DDI:-0}"
+PIN_MEMORY="${PIN_MEMORY:-1}"
+COMPILE_MODEL="${COMPILE_MODEL:-0}"
 
 read -r -a FOLD_LIST <<< "${FOLDS}"
 
 COMMON_TRAIN_ARGS=(
   --dataset-group ptv3
-  --model-type attention_v10_hetero_cls_ee
+  --model-type "${MODEL_TYPE}"
   --batch-size "${BATCH_SIZE}"
   --max-epochs "${MAX_EPOCHS}"
   --learning-rate "${LEARNING_RATE}"
+  --weight-decay "${WEIGHT_DECAY}"
   --hidden-dim "${HIDDEN_DIM}"
+  --expression-latent-dim "${EXPRESSION_LATENT_DIM}"
+  --covariate-embedding-dim "${COVARIATE_EMBEDDING_DIM}"
   --num-heads "${NUM_HEADS}"
   --num-layers "${NUM_LAYERS}"
   --dropout "${DROPOUT}"
+  --control-layers "${CONTROL_LAYERS}"
+  --fusion-layers "${FUSION_LAYERS}"
+  --target-layers "${TARGET_LAYERS}"
   --mse-weight "${MSE_WEIGHT}"
+  --mse-inactive-label-weight "${MSE_INACTIVE_LABEL_WEIGHT}"
+  --mse-gene-subsample "${MSE_GENE_SUBSAMPLE}"
+  --active-label-sampling-weight "${ACTIVE_LABEL_SAMPLING_WEIGHT}"
+  --positive-label-sampling-weight "${POSITIVE_LABEL_SAMPLING_WEIGHT}"
+  --inactive-label-train-ratio "${INACTIVE_LABEL_TRAIN_RATIO}"
+  --label-smoothing "${LABEL_SMOOTHING}"
   --optimizer-name "${OPTIMIZER_NAME}"
   --accelerator gpu
   --devices "${DEVICES}"
-  --strategy ddp_find_unused_parameters_true
+  --strategy "${STRATEGY}"
   --precision "${PRECISION}"
   --num-workers "${NUM_WORKERS}"
   --gradient-clip-val "${GRADIENT_CLIP_VAL}"
@@ -111,6 +177,28 @@ COMMON_TRAIN_ARGS=(
   --limit-train-batches "${LIMIT_TRAIN_BATCHES}"
   --limit-val-batches "${LIMIT_VAL_BATCHES}"
   --limit-test-batches "${LIMIT_TEST_BATCHES}"
+  --target-protein-max-length "${TARGET_PROTEIN_MAX_LENGTH}"
+  --graph-feature-mode "${GRAPH_FEATURE_MODE}"
+  --graph-feature-dim "${GRAPH_FEATURE_DIM}"
+  --graph-feature-seed "${GRAPH_FEATURE_SEED}"
+  --graph-cache-dir "${GRAPH_CACHE_DIR}"
+  --graph-layers "${GRAPH_LAYERS}"
+  --graph-init-scale "${GRAPH_INIT_SCALE}"
+  --graph-pair-add-scale "${GRAPH_PAIR_ADD_SCALE}"
+  --graph-logit-scale "${GRAPH_LOGIT_SCALE}"
+  --graph-jump-fusion "${GRAPH_JUMP_FUSION}"
+  --graph-jump-gate "${GRAPH_JUMP_GATE}"
+  --graph-jump-temperature "${GRAPH_JUMP_TEMPERATURE}"
+  --pair-fusion-mode "${PAIR_FUSION_MODE}"
+  --protein-concat-mode "${PROTEIN_CONCAT_MODE}"
+  --protein-concat-dim "${PROTEIN_CONCAT_DIM}"
+  --protein-concat-topk "${PROTEIN_CONCAT_TOPK}"
+  --protein-concat-init-scale "${PROTEIN_CONCAT_INIT_SCALE}"
+  --protein-concat-seed "${PROTEIN_CONCAT_SEED}"
+  --control-logit-scale "${CONTROL_LOGIT_SCALE}"
+  --pair-logit-scale "${PAIR_LOGIT_SCALE}"
+  --target-logit-scale "${TARGET_LOGIT_SCALE}"
+  --covariate-logit-scale "${COVARIATE_LOGIT_SCALE}"
 )
 
 if [[ -n "${SAVE_EVERY_N_TRAIN_STEPS}" ]]; then
@@ -137,6 +225,27 @@ fi
 if [[ -n "${POSITIVE_WEIGHT}" ]]; then
   COMMON_TRAIN_ARGS+=(--positive-weight "${POSITIVE_WEIGHT}")
 fi
+if [[ "${GRAPH_STRUCTURAL_RP}" == "1" ]]; then
+  COMMON_TRAIN_ARGS+=(--graph-structural-rp)
+fi
+if [[ "${GRAPH_MULTIHOP}" == "1" ]]; then
+  COMMON_TRAIN_ARGS+=(--graph-multihop)
+fi
+if [[ "${GRAPH_DRUG_CONCAT}" == "1" ]]; then
+  COMMON_TRAIN_ARGS+=(--graph-drug-concat)
+fi
+if [[ "${PAIR_TYPE_FEATURES}" == "1" ]]; then
+  COMMON_TRAIN_ARGS+=(--pair-type-features)
+fi
+if [[ "${USE_DDI}" == "1" ]]; then
+  COMMON_TRAIN_ARGS+=(--use-ddi)
+fi
+if [[ "${PIN_MEMORY}" != "1" ]]; then
+  COMMON_TRAIN_ARGS+=(--no-pin-memory)
+fi
+if [[ "${COMPILE_MODEL}" == "1" ]]; then
+  COMMON_TRAIN_ARGS+=(--compile-model)
+fi
 if [[ "${FOCAL_LOSS}" == "1" ]]; then
   COMMON_TRAIN_ARGS+=(--focal-loss)
 fi
@@ -161,6 +270,58 @@ fi
 if [[ -n "${WANDB_TAGS}" ]]; then
   read -r -a WANDB_TAG_LIST <<< "${WANDB_TAGS}"
   COMMON_TRAIN_ARGS+=(--wandb-tags "${WANDB_TAG_LIST[@]}")
+fi
+
+COMMON_INFER_ARGS=(
+  --dataset-group ptv3
+  --model-type "${MODEL_TYPE}"
+  --batch-size "${INFER_BATCH_SIZE}"
+  --hidden-dim "${HIDDEN_DIM}"
+  --expression-latent-dim "${EXPRESSION_LATENT_DIM}"
+  --covariate-embedding-dim "${COVARIATE_EMBEDDING_DIM}"
+  --num-heads "${NUM_HEADS}"
+  --num-layers "${NUM_LAYERS}"
+  --dropout "${DROPOUT}"
+  --control-layers "${CONTROL_LAYERS}"
+  --fusion-layers "${FUSION_LAYERS}"
+  --target-layers "${TARGET_LAYERS}"
+  --target-protein-max-length "${TARGET_PROTEIN_MAX_LENGTH}"
+  --graph-feature-mode "${GRAPH_FEATURE_MODE}"
+  --graph-feature-dim "${GRAPH_FEATURE_DIM}"
+  --graph-feature-seed "${GRAPH_FEATURE_SEED}"
+  --graph-cache-dir "${GRAPH_CACHE_DIR}"
+  --graph-layers "${GRAPH_LAYERS}"
+  --graph-init-scale "${GRAPH_INIT_SCALE}"
+  --graph-pair-add-scale "${GRAPH_PAIR_ADD_SCALE}"
+  --graph-logit-scale "${GRAPH_LOGIT_SCALE}"
+  --graph-jump-fusion "${GRAPH_JUMP_FUSION}"
+  --graph-jump-gate "${GRAPH_JUMP_GATE}"
+  --graph-jump-temperature "${GRAPH_JUMP_TEMPERATURE}"
+  --pair-fusion-mode "${PAIR_FUSION_MODE}"
+  --protein-concat-mode "${PROTEIN_CONCAT_MODE}"
+  --protein-concat-dim "${PROTEIN_CONCAT_DIM}"
+  --protein-concat-topk "${PROTEIN_CONCAT_TOPK}"
+  --protein-concat-init-scale "${PROTEIN_CONCAT_INIT_SCALE}"
+  --protein-concat-seed "${PROTEIN_CONCAT_SEED}"
+  --control-logit-scale "${CONTROL_LOGIT_SCALE}"
+  --pair-logit-scale "${PAIR_LOGIT_SCALE}"
+  --target-logit-scale "${TARGET_LOGIT_SCALE}"
+  --covariate-logit-scale "${COVARIATE_LOGIT_SCALE}"
+)
+if [[ "${GRAPH_STRUCTURAL_RP}" == "1" ]]; then
+  COMMON_INFER_ARGS+=(--graph-structural-rp)
+fi
+if [[ "${GRAPH_MULTIHOP}" == "1" ]]; then
+  COMMON_INFER_ARGS+=(--graph-multihop)
+fi
+if [[ "${GRAPH_DRUG_CONCAT}" == "1" ]]; then
+  COMMON_INFER_ARGS+=(--graph-drug-concat)
+fi
+if [[ "${PAIR_TYPE_FEATURES}" == "1" ]]; then
+  COMMON_INFER_ARGS+=(--pair-type-features)
+fi
+if [[ "${USE_DDI}" == "1" ]]; then
+  COMMON_INFER_ARGS+=(--use-ddi)
 fi
 
 ptv3_utc_now() {
@@ -217,16 +378,19 @@ ptv3_print_settings() {
   echo "[experiment] ${title}"
   echo "[settings] EXP_PREFIX=${EXP_PREFIX}"
   echo "[settings] FOLDS=${FOLDS}"
-  echo "[settings] MAX_EPOCHS=${MAX_EPOCHS}"
-  echo "[settings] BATCH_SIZE=${BATCH_SIZE} per GPU; DEVICES=${DEVICES}; GPU_IDS=${GPU_IDS}"
+  echo "[settings] MODEL_TYPE=${MODEL_TYPE}; MAX_EPOCHS=${MAX_EPOCHS}"
+  echo "[settings] BATCH_SIZE=${BATCH_SIZE}; DEVICES=${DEVICES}; STRATEGY=${STRATEGY}; GPU_IDS=${GPU_IDS}"
   echo "[settings] LEARNING_RATE=${LEARNING_RATE}; OPTIMIZER_NAME=${OPTIMIZER_NAME}; SCHEDULER_NAME=${SCHEDULER_NAME:-none}"
+  echo "[settings] GRAPH_FEATURE_MODE=${GRAPH_FEATURE_MODE}; GRAPH_STRUCTURAL_RP=${GRAPH_STRUCTURAL_RP}; GRAPH_DRUG_CONCAT=${GRAPH_DRUG_CONCAT}; GRAPH_PAIR_ADD_SCALE=${GRAPH_PAIR_ADD_SCALE}; GRAPH_LOGIT_SCALE=${GRAPH_LOGIT_SCALE}; USE_DDI=${USE_DDI}; PROTEIN_CONCAT_MODE=${PROTEIN_CONCAT_MODE}"
+  echo "[settings] CONTROL_LOGIT_SCALE=${CONTROL_LOGIT_SCALE}; PAIR_LOGIT_SCALE=${PAIR_LOGIT_SCALE}; TARGET_LOGIT_SCALE=${TARGET_LOGIT_SCALE}; COVARIATE_LOGIT_SCALE=${COVARIATE_LOGIT_SCALE}"
+  echo "[settings] PAIR_FUSION_MODE=${PAIR_FUSION_MODE}; PAIR_TYPE_FEATURES=${PAIR_TYPE_FEATURES}; MSE_INACTIVE_LABEL_WEIGHT=${MSE_INACTIVE_LABEL_WEIGHT}; ACTIVE_LABEL_SAMPLING_WEIGHT=${ACTIVE_LABEL_SAMPLING_WEIGHT}; POSITIVE_LABEL_SAMPLING_WEIGHT=${POSITIVE_LABEL_SAMPLING_WEIGHT}; INACTIVE_LABEL_TRAIN_RATIO=${INACTIVE_LABEL_TRAIN_RATIO}"
   echo "[settings] LOGGER_BACKEND=${LOGGER_BACKEND}; LOG_TO_WANDB=${LOG_TO_WANDB}; WANDB_PROJECT=${WANDB_PROJECT}"
   echo "[settings] LOG_EVERY_N_STEPS=${LOG_EVERY_N_STEPS}; CHECK_VAL_EVERY_N_EPOCH=${CHECK_VAL_EVERY_N_EPOCH}"
   echo "[settings] BEST_CKPT_METRIC=${BEST_CKPT_METRIC}; MONITOR=${MONITOR:-auto}; MONITOR_MODE=${MONITOR_MODE:-auto}; ALLOW_NONFINITE_MONITOR=${ALLOW_NONFINITE_MONITOR}"
   echo "[settings] REFERENCE_5FOLD_CKPT_PATH=${REFERENCE_5FOLD_CKPT_PATH:-none}; REFERENCE_EPOCH_AGG=${REFERENCE_EPOCH_AGG}; REFERENCE_EPOCH_ROUNDING=${REFERENCE_EPOCH_ROUNDING}; REFERENCE_EPOCH_MIN_COUNT=${REFERENCE_EPOCH_MIN_COUNT}"
   echo "[settings] REFERENCE_REQUIRE_TEST_COMPLETED=${REFERENCE_REQUIRE_TEST_COMPLETED}; REFERENCE_SPLIT_STRATEGY_REGEX=${REFERENCE_SPLIT_STRATEGY_REGEX:-script-default}; REFERENCE_ALLOW_MIXED_CONFIG=${REFERENCE_ALLOW_MIXED_CONFIG}; REFERENCE_ALLOW_DUPLICATE_SPLITS=${REFERENCE_ALLOW_DUPLICATE_SPLITS}"
   echo "[settings] SAVE_EVERY_N_EPOCHS=${SAVE_EVERY_N_EPOCHS}; SAVE_EVERY_N_TRAIN_STEPS=${SAVE_EVERY_N_TRAIN_STEPS:-none}"
-  echo "[settings] RUN_PREFLIGHT=${RUN_PREFLIGHT}; RUN_INFERENCE=${RUN_INFERENCE}"
+  echo "[settings] RUN_PREFLIGHT=${RUN_PREFLIGHT}; RUN_DATA_VALIDATION=${RUN_DATA_VALIDATION}; RUN_INFERENCE=${RUN_INFERENCE}"
   echo "[settings] TIME_SUMMARY_PATH=${TIME_SUMMARY_PATH}"
 }
 
@@ -238,16 +402,23 @@ ptv3_run_preflight() {
     train.py \
     infer.py \
     dataset/training_ready_dataset.py \
+    dataset/training_ready_fast_dataset.py \
+    model/fast_delta_model.py \
+    model/fast_lightning.py \
+    model/graph_feature_utils.py \
     model/training_ready_models.py \
     model/training_ready_lightning.py \
-    scripts/select_reference_epoch.py \
-    utils/00_standardize_rawdata.py \
-    utils/01_validate_standardized_outputs.py \
-    utils/02_build_training_ready_data.py \
-    utils/03_validate_training_ready_outputs.py \
-    utils/09_build_data_splits.py
-  "${PYTHON_BIN}" utils/01_validate_standardized_outputs.py
-  "${PYTHON_BIN}" utils/03_validate_training_ready_outputs.py
+    scripts/check_wandb_auth.py \
+    scripts/select_reference_epoch.py
+  if [[ "${RUN_DATA_VALIDATION}" == "1" ]]; then
+    "${PYTHON_BIN}" utils/01_validate_standardized_outputs.py
+    "${PYTHON_BIN}" utils/03_validate_training_ready_outputs.py
+  fi
+  "${PYTHON_BIN}" scripts/check_wandb_auth.py \
+    --logger-backend "${LOGGER_BACKEND}" \
+    --log-to-wandb "${LOG_TO_WANDB}" \
+    --wandb-mode "${WANDB_MODE}" \
+    --wandb-env-file "${WANDB_ENV_FILE}"
 }
 
 ptv3_train() {
@@ -332,7 +503,7 @@ ptv3_reference_epoch() {
     "${reference_path}"
     --task-name "${task_name}"
     --expect-task-head "${task_head}"
-    --expect-model-type attention_v10_hetero_cls_ee
+    --expect-model-type "${MODEL_TYPE}"
     --expect-dataset-group ptv3
     --method "${REFERENCE_EPOCH_AGG}"
     --rounding "${REFERENCE_EPOCH_ROUNDING}"
@@ -436,8 +607,7 @@ ptv3_infer() {
   start_sec="$(date +%s)"
   set +e
   CUDA_VISIBLE_DEVICES="${GPU_IDS}" "${PYTHON_BIN}" -u infer.py \
-    --dataset-group ptv3 \
-    --model-type attention_v10_hetero_cls_ee \
+    "${COMMON_INFER_ARGS[@]}" \
     --task-name "${task_name}" \
     --split-strategy test_only \
     --split-name test \

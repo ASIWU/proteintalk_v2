@@ -1,0 +1,8 @@
+# Copy this file to scripts/wandb_env.local and fill local credentials.
+# scripts/wandb_env.local is ignored by git.
+
+# Optional for a private/local W&B server. Leave unset for wandb.ai.
+# export WANDB_BASE_URL="http://your-wandb-host:8080"
+
+# Required for online W&B logging when no `wandb login` credentials exist.
+# export WANDB_API_KEY="your_api_key"

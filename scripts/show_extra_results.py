@@ -15,7 +15,7 @@ from typing import Any
 
 DEFAULT_OUTPUT_DIR = Path("outputs/20260513_extra_double_all_train_infer_all_single_double_for_extra")
 METRIC_KEYS = ("auroc", "auprc", "acc")
-COUNT_KEYS = ("valid_count", "positive_count", "negative_count")
+COUNT_KEYS = ("valid_count", "positive_count", "negative_count", "count")
 DEFAULT_COLUMNS = (
     ("task_name", "task"),
     ("head", "head"),
@@ -242,8 +242,11 @@ def build_record(
     }
     for key in METRIC_KEYS:
         record[key] = finite_float(values.get(key))
-    for key in COUNT_KEYS:
-        record[key] = int_count(values.get(key))
+    record["valid_count"] = int_count(values.get("valid_count"))
+    if record["valid_count"] is None:
+        record["valid_count"] = int_count(values.get("count"))
+    record["positive_count"] = int_count(values.get("positive_count"))
+    record["negative_count"] = int_count(values.get("negative_count"))
     return record
 
 

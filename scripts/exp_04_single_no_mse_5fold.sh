@@ -4,7 +4,7 @@ set -euo pipefail
 EXPERIMENT_SET_NAME="single_no_mse_5fold"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ptv3_experiment_common.sh"
 
-ptv3_print_settings "Single-drug no-MSE ablation on pert_stratified 5-fold"
+ptv3_print_settings "Baseline4 single-drug w/o MSE ablation on pert_stratified 5-fold"
 ptv3_run_preflight
 
 for fold in "${FOLD_LIST[@]}"; do

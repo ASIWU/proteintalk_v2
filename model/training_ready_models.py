@@ -27,6 +27,7 @@ except Exception:  # pragma: no cover - dependency is validated in flow_v2.
 
 
 PDI_HETERO_MODEL_NAME = "attention_v10_hetero_cls_ee"
+FAST_DELTA_MODEL_NAME = "fast_delta"
 
 GRAPH_MODEL_NAMES = {
     PDI_HETERO_MODEL_NAME,
@@ -34,6 +35,7 @@ GRAPH_MODEL_NAMES = {
 
 SELECTED_MODEL_NAMES = {
     PDI_HETERO_MODEL_NAME,
+    FAST_DELTA_MODEL_NAME,
     "baseline_emb_v3",
 }
 

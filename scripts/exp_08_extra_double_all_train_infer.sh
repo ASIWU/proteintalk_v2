@@ -2,9 +2,17 @@
 set -euo pipefail
 
 EXPERIMENT_SET_NAME="extra_double_all_train_infer"
+
+# Match the validated double-drug 5-fold default used by exp_06.
+PAIR_FUSION_MODE="${PAIR_FUSION_MODE:-dual}"
+PAIR_TYPE_FEATURES="${PAIR_TYPE_FEATURES:-1}"
+MSE_INACTIVE_LABEL_WEIGHT="${MSE_INACTIVE_LABEL_WEIGHT:-0.2}"
+USE_DDI="${USE_DDI:-1}"
+GRAPH_PAIR_ADD_SCALE="${GRAPH_PAIR_ADD_SCALE:-0.5}"
+
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ptv3_experiment_common.sh"
 
-ptv3_print_settings "Train on all single+double data, then infer extra double-drug datasets"
+ptv3_print_settings "Baseline4 train on all single+double data, then infer extra double-drug datasets"
 ptv3_run_preflight
 
 all_single_double_exp="${EXP_PREFIX}_all_single_double_for_extra"

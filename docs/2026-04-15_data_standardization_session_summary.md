@@ -1283,3 +1283,147 @@ python utils/01_validate_standardized_outputs.py
   - `0.25`: AUPRC `0.666491`，AUROC `0.903489`；
   - `0.50`: AUPRC `0.658686`，AUROC `0.893493`。
 - 结论：`mse_weight=0.25` 保持为 baseline4；baseline4 相比 baseline3 AUPRC `+0.010122`、AUROC `+0.003173`，同时支持一张 GPU 一个 fold 的高效并行。
+
+## 2026-05-21 15:22 HKT Baseline4 Root Integration and 8-GPU Parallel Launcher
+
+- 将 `new_version` 中的 baseline4 训练框架迁移到根路径训练/推理体系：
+  - 新增 `dataset/training_ready_fast_dataset.py`；
+  - 新增 `model/fast_delta_model.py`；
+  - 新增 `model/fast_lightning.py`；
+  - 新增 `model/graph_feature_utils.py`；
+  - `train.py` 新增 `model_type=fast_delta` 分支，并将默认训练配置改为单卡、`batch_size=256`、bf16、baseline4 graph/PCEP 参数；
+  - `infer.py` 新增 `fast_delta` 推理分支。
+- 保留旧 `attention_v10_hetero_cls_ee` 分支以兼容历史 checkpoint，但 `scripts/exp_0[1-8].sh` 默认已切换到 `fast_delta`。
+- 重写 `scripts/ptv3_experiment_common.sh` 默认配置：
+  - `DEVICES=1`；
+  - `BATCH_SIZE=256`；
+  - `PRECISION=bf16-mixed`；
+  - `LOGGER_BACKEND=wandb`、`LOG_TO_WANDB=1`；
+  - baseline4 默认启用 PPI/PDI/DDI graph feature、structural RP、drug concat、`graph_logit_scale=2.0`、`PCEP`。
+- `scripts/exp_05_single_no_pdi_5fold.sh` 改为 w/o graph feature ablation，实际传入 `--graph-feature-mode zero`。
+- 新增 `scripts/0521_baseline4_8gpu_parallel.sh`：
+  - 第一阶段把 exp01-06 的 fold 任务拆成单卡任务队列，默认在 `GPU_IDS=0,1,2,3,4,5,6,7` 上同时最多跑 8 个任务；
+  - 第二阶段等待 reference 5-fold 完成后，并行启动 exp07/08 all-train + extra inference；
+  - 默认使用 wandb，用户可用 `LOGGER_BACKEND=none LOG_TO_WANDB=0` 做 smoke/debug。
+- `infer.py` fast 分支新增 checkpoint protein axis 对齐：extra task 的表达矩阵若与训练 checkpoint 的 protein axis 不同，会按 checkpoint axis 重排，缺失蛋白列补 NaN，MSE 相关计算按 mask 忽略，分类推理继续可用。
+- 2 GPU smoke 测试通过：
+  - 命令使用 `GPU_IDS=0,1 FOLDS=0 MAX_EPOCHS=1 LIMIT_TRAIN_BATCHES=1 LIMIT_VAL_BATCHES=1 LIMIT_TEST_BATCHES=1 INFER_LIMIT_BATCHES=1 LOGGER_BACKEND=none LOG_TO_WANDB=0`；
+  - exp01-06 fold0 均 `fit_completed/test_completed`；
+  - exp07/08 all-train 均 `fit_completed`；
+  - 6 个 extra single + 3 个 extra double inference 均写出 `predictions.parquet`；
+  - runtime summary: `logs/20260521_root_baseline4_smoke2_runtime_summary.tsv`。
+
+## 2026-05-21 15:25 HKT Baseline4 Extra Inference Reference Epoch Mean
+
+- 用户确认 extra inference 应使用 unseen drug 5-fold 的 average best epoch。
+- 将 `scripts/ptv3_experiment_common.sh` 中 `REFERENCE_EPOCH_AGG` 默认值从 `median` 改为 `mean`。
+- 当前 exp07/exp08 reference epoch 逻辑为：
+  - single extra：从 `ptv3_main_singledrug` 的 `pert_stratified_5fold_fold*` reference runs 读取每个 fold 的 `best_model_path` epoch，取 mean 后按 `REFERENCE_EPOCH_ROUNDING` 得到 `selected_epoch`；
+  - double extra：从 `ptv3_main_doubledrug` 的 `pert_id_5fold_fold*` reference runs 读取每个 fold 的 `best_model_path` epoch，取 mean 后按 `REFERENCE_EPOCH_ROUNDING` 得到 `selected_epoch`；
+  - all-train 使用 `max_epochs=selected_epoch+1` 和 `--monitor none`，最后用 `last.ckpt` 对 extra task 做 inference。
+
+## 2026-05-21 15:54 HKT Baseline4 Graph Cache Prebuild and Launcher Hardening
+
+- 新增 `scripts/prebuild_graph_cache.py`，用于在并行训练前单进程预构建 baseline4 的 PPI/PDI/DDI compressed graph feature cache，并写出 graph cache summary。
+- `scripts/0521_baseline4_8gpu_parallel.sh` 在启动 8 个 fold worker 前会先调用 graph cache prebuild；`GRAPH_FEATURE_MODE=off` 时跳过。
+- `model/graph_feature_utils.py` 增加 graph cache 文件锁和 atomic replace：
+  - 同一 cache 文件只能由一个进程构建；
+  - `.npy` 与 `.meta.json` 写入改为临时文件完成后原子替换，降低并发/中断导致半写入 cache 的风险。
+- `infer.py` fast checkpoint validation 增加 graph/PCEP 结构参数校验，并兼容旧 baseline4 smoke checkpoint 缺失新增 manifest 字段但参数等于旧默认值的情况。
+- `scripts/0521_baseline4_8gpu_parallel.sh` 的 stage1/stage2 后台任务等待逻辑改为等待所有 worker 后统一报错，避免一个 worker 失败时 launcher 提前退出而遗漏其他后台任务状态。
+- `scripts/show_extra_results.py` 增加 fast metrics 兼容：当 `metrics.json` 中只有 `count` 字段时，会将其作为 `valid_count` 展示，因此可直接汇总 baseline4 extra inference 输出。
+
+## 2026-05-21 16:42 HKT Baseline4 W&B Credential Preflight
+
+- 用户运行 8-GPU baseline4 launcher 时遇到 `wandb.errors.UsageError: api_key not configured (no-tty)`。
+- 确认新 `scripts/0521_baseline4_8gpu_parallel.sh` 没有写入或覆盖 `WANDB_API_KEY` / `WANDB_BASE_URL`；旧 `0509/0513/0518` wrapper 曾硬编码本地 W&B endpoint/key，新 launcher 未复用硬编码 credential，以避免 GitHub 上传时继续泄露 secret。
+- 新增 `scripts/wandb_env.local.example`，并在 `.gitignore` 中忽略 `scripts/wandb_env.local`；用户可将本地 W&B `WANDB_BASE_URL` 与 `WANDB_API_KEY` 放入该未跟踪文件。
+- 新增 `scripts/check_wandb_auth.py`：
+  - online W&B 开启时，启动训练前检查 `WANDB_API_KEY` 或 `~/.netrc` credential；
+  - 缺失 credential 时在 preflight 阶段给出清晰错误，不再让 8 个并行 worker 同时抛 no-tty stack trace；
+  - `WANDB_MODE=offline/disabled` 或 `LOGGER_BACKEND=none LOG_TO_WANDB=0` 时跳过 credential 检查。
+- `scripts/ptv3_experiment_common.sh` 和 `scripts/0521_baseline4_8gpu_parallel.sh` 会自动 source `scripts/wandb_env.local`（若存在）后再构造训练参数。
+- 用户要求继续直接硬编码本地 W&B credential；已在 `scripts/ptv3_experiment_common.sh` 和 `scripts/0521_baseline4_8gpu_parallel.sh` 中加入本地 W&B server/key 默认值。若 shell 环境或 `scripts/wandb_env.local` 显式设置同名变量，则仍可覆盖默认值。
+
+## 2026-05-21 19:39 HKT Double-Drug Data Composition and Pair Fusion Iteration
+
+- 针对 double-drug 5-fold 分数偏低的问题，先 review 了 single/double 共用 fast model 的数据与 mask 逻辑：
+  - single 辅助行在 double task 中以 `[drug, drug]` 进入模型，但 `synergy` label mask 为 inactive，只参与 expression reconstruction；
+  - double 主行以 `[drug1, drug2]` 进入模型，`synergy` label mask active，参与 BCE + expression reconstruction；
+  - `_masked_bce` 使用 `1 - mask` 加权，未发现 masked single auxiliary row 进入 binary loss 的证据。
+- 新增可控实验开关：
+  - `--pair-fusion-mode {symmetric,rich_symmetric,ordered_concat,dual}`，其中 `dual` 使用 `[mean, absdiff, product, drug1, drug2]`；
+  - `--pair-type-features`，显式编码 `drug1 == drug2`，区分 single auxiliary row 与 true double pair；
+  - `--mse-inactive-label-weight`，控制 active label 缺失样本在 MSE reconstruction 中的权重；
+  - `--inactive-label-train-ratio`，支持只用 active double rows 或限制 single auxiliary/masked rows 的比例；
+  - `--active-label-sampling-weight`，支持训练采样时提高 active double rows 权重。
+- 完成主要 double-drug 5-fold 实验：
+  - 原 baseline4 double：AUROC `0.694998`，AUPRC `0.600952`；
+  - `dual + pair_type + mse_inactive_label_weight=0.2`：AUROC `0.744865`，AUPRC `0.656621`；
+  - double-only active rows（`inactive_label_train_ratio=0`）：AUROC `0.731969`，AUPRC `0.629023`；
+  - 限制 single auxiliary/masked rows 到 active rows 的 2 倍（`inactive_label_train_ratio=2`）：AUROC `0.730526`，AUPRC `0.629443`；
+  - `dual + pair_type + mse_inactive_label_weight=0.2 + use_ddi + graph_pair_add_scale=0.5`：AUROC `0.756597`，AUPRC `0.661878`。
+- 数据角度结论：
+  - 只用 double 数据没有提升，反而低于保留全部 single auxiliary 的设置；
+  - single auxiliary row 更像是有用的 expression reconstruction 正则，但需要降低其 MSE 权重并显式标注 pair type；
+  - double 低分的主要问题更接近 pair fusion 表达不足，而不是 binary loss mask 误写。
+- 回归测试：
+  - single 默认 5-fold 重新跑完后与前一版一致：AUROC `0.903489`，AUPRC `0.666491`，ACC `0.915167`；
+  - 说明新增参数默认值保持 single baseline 行为不变。
+- 将 double-drug 默认实验脚本对齐到当前达到目标的设置：
+  - `scripts/exp_06_double_pert_pair_5fold.sh` 和 `scripts/exp_08_extra_double_all_train_infer.sh` 默认使用 `PAIR_FUSION_MODE=dual`、`PAIR_TYPE_FEATURES=1`、`MSE_INACTIVE_LABEL_WEIGHT=0.2`、`USE_DDI=1`、`GRAPH_PAIR_ADD_SCALE=0.5`；
+  - `scripts/0521_baseline4_8gpu_parallel.sh` 为 exp06/exp08 传入同一组 double 专用默认值；
+  - single 相关脚本保留 baseline4 默认值。
+- 校验：
+  - `python -m py_compile` 覆盖 train/infer/fast model/graph/cache/reference 脚本通过；
+  - `bash -n` 覆盖 exp06/exp08/8-GPU launcher/common 脚本通过；
+  - `EXP_PREFIX=20260521_1940_double_default_smoke GPU_IDS=0 FOLDS=0 MAX_EPOCHS=1 LIMIT_*_BATCHES=1 LOGGER_BACKEND=none LOG_TO_WANDB=0 RUN_INFERENCE=0 bash scripts/exp_06_double_pert_pair_5fold.sh` 通过，并打印确认默认 double 设置为 `dual + pair_type + mse_inactive=0.2 + use_ddi + graph_pair_add=0.5`。
+
+## 2026-05-21 19:50 HKT Task-Specific Single/Double Rerun Launcher
+
+- 明确 single drug 与 double drug 可使用同一个 `fast_delta` 模型类，但在 pair feature fusion 相关超参数上采用任务级配置。
+- `scripts/0521_baseline4_8gpu_parallel.sh` 新增显式 single/double 配置：
+  - single 默认：`PAIR_FUSION_MODE=symmetric`、`PAIR_TYPE_FEATURES=0`、`MSE_INACTIVE_LABEL_WEIGHT=1.0`、`USE_DDI=0`、`GRAPH_PAIR_ADD_SCALE=0.0`；
+  - double 默认：`PAIR_FUSION_MODE=dual`、`PAIR_TYPE_FEATURES=1`、`MSE_INACTIVE_LABEL_WEIGHT=0.2`、`USE_DDI=1`、`GRAPH_PAIR_ADD_SCALE=0.5`。
+- fold stage 中 exp01-05 显式传入 single 配置，exp06 显式传入 double 配置；extra stage 中 exp07 显式传入 single 配置，exp08 显式传入 double 配置。
+- 新增 `scripts/0521_baseline4_task_specific_8gpu_parallel.sh`，作为最终重跑入口，默认固定上述 task-specific 配置后复用 `scripts/0521_baseline4_8gpu_parallel.sh` 的并行调度逻辑。
+- `bash -n` 覆盖 `scripts/0521_baseline4_8gpu_parallel.sh`、`scripts/0521_baseline4_task_specific_8gpu_parallel.sh`、exp01/06/07/08 通过；`git diff --check` 通过。
+
+## 2026-05-22 16:14 HKT Unseen Cell/Cell-Type Iteration
+
+- 目标：在 2-GPU 服务器上继续优化 `single_cell_type_5fold` 与 `single_cell_5fold` 的 AUPRC，优先尝试参数、covariate encoding、轻量可控模块和数据角度诊断。
+- 新增 split-aware covariate UNK encoding：
+  - `FastProteinTalkDataset` 支持将 validation/test 中训练 split 未出现的 covariate category 映射到保留的 UNK embedding；
+  - 训练时可通过 `--covariate-unk-dropout` 随机替换 enabled covariates 为 UNK，训练共享未知类别表示；
+  - `train.py` 新增 `--covariate-unk-for-unseen`、`--covariate-unk-fields`、`--covariate-unk-dropout`，manifest 记录相关配置。
+- 新增轻量可控实验模块：
+  - `FastDeltaDrugResponseModel` 增加默认关闭的 auxiliary logit heads：`--control-logit-scale`、`--pair-logit-scale`、`--target-logit-scale`、`--covariate-logit-scale`；
+  - `train.py`/`infer.py`/`scripts/ptv3_experiment_common.sh` 透传这些参数，默认均为 `0.0`，不改变 baseline 行为；
+  - `train.py` 增加 `--positive-label-sampling-weight`，用于温和 oversample positive active-label rows，默认 `1.0` 关闭。
+- 修复 fast inference 对 covariate UNK checkpoint 的兼容：
+  - `infer.py` 会从 checkpoint manifest 读取 `covariate_unk_fields`；
+  - 根据 checkpoint 的训练 split 计算 known covariate values，并在 inference dataset 中映射未知 category；
+  - fast model covariate embedding size 使用 checkpoint-aware size，避免 UNK checkpoint 载入时 size mismatch。
+- 完成 full 5-fold 实验（均为 1 GPU、batch size 256、logger off）：
+  - baseline4 当前参考：cell type AUPRC `0.787186`，cell AUPRC `0.735066`；
+  - `MSE_WEIGHT=0.1`：cell type `0.794984`，cell `0.739205`；
+  - covariate UNK full fields、dropout `0.15`、`MSE_WEIGHT=0.1`：cell type `0.814780`，cell `0.761629`，为本轮最佳；
+  - covariate UNK + `valid_auroc` checkpoint：cell type `0.815947`，cell `0.748006`；
+  - covariate UNK + `MSE_WEIGHT=0`：cell type `0.806767`，cell `0.756831`；
+  - auxiliary logits（control `0.5`、pair `1.0`、target `0.5`）：cell type `0.811393`，cell `0.742966`；
+  - stronger regularization（dropout `0.30`、weight decay `5e-4`、label smoothing `0.03`）：cell type `0.810939`，cell `0.742051`;
+  - positive sampler weight `3.0`：cell type `0.810426`，cell `0.728539`;
+  - covariate slim variants and field-specific UNK variants did not exceed full-field covariate UNK;
+  - no-covariate ablation（`--batch-cov-list` 为空，删除 cell/time/machine/batch 等全部 covariates）：cell type `0.783888`，cell `0.742423`，未超过 full-field covariate UNK;
+  - drop-`Cell` covariate only（保留 `machineID_new`、`Cell_plate`、`cell_type`、`batch`、`pert_time`，covariate UNK dropout `0.15`）：cell type `0.815047`，cell `0.758506`，与 full-field covariate UNK 接近但未稳定超过;
+  - smaller model (`hidden_dim=256`, `expression_latent_dim=384`, `covariate_embedding_dim=48`) did not improve AUPRC, but is a potential speed/efficiency setting if lower capacity is preferred.
+- Data diagnostic:
+  - train-only drug response prior alone was weaker than the model;
+  - linear mixing model predictions with train-only drug prior only gave tiny improvements (cell type best approx `0.821`, cell best approx `0.766`), so no target-encoding prior was added to the model path.
+- Current conclusion:
+  - The reliable improvement is covariate UNK encoding, especially for unseen cell/cell-type splits where many covariate categories are absent from train;
+  - The 0.85 AUPRC target was not reached without larger architecture/data changes;
+  - Current best candidate for these splits is full-field covariate UNK dropout `0.15` with `MSE_WEIGHT=0.1`.
+- Validation:
+  - `python -m py_compile train.py infer.py dataset/training_ready_fast_dataset.py model/fast_delta_model.py model/fast_lightning.py scripts/check_wandb_auth.py` passed;
+  - smoke tested fast `infer.py` on a covariate UNK checkpoint with one test batch and wrote `outputs/smoke_covunk_infer_20260522/predictions.parquet`.

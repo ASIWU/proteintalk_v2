@@ -4,7 +4,7 @@ set -euo pipefail
 EXPERIMENT_SET_NAME="extra_single_all_train_infer"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ptv3_experiment_common.sh"
 
-ptv3_print_settings "Train on all single-drug data, then infer extra single-drug datasets"
+ptv3_print_settings "Baseline4 train on all single-drug data, then infer extra single-drug datasets"
 ptv3_run_preflight
 
 all_single_exp="${EXP_PREFIX}_all_single_for_extra"

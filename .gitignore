@@ -29,6 +29,7 @@ ENV/
 .env
 .env.*
 !.env.example
+scripts/wandb_env.local
 
 # Build and packaging artifacts
 build/
@@ -97,4 +98,5 @@ nohup.out
 slurm-*.out
 
 */graph_cache/
+graph_cache/
 */runtime_logs/
