@@ -1427,3 +1427,39 @@ python utils/01_validate_standardized_outputs.py
 - Validation:
   - `python -m py_compile train.py infer.py dataset/training_ready_fast_dataset.py model/fast_delta_model.py model/fast_lightning.py scripts/check_wandb_auth.py` passed;
   - smoke tested fast `infer.py` on a covariate UNK checkpoint with one test batch and wrote `outputs/smoke_covunk_infer_20260522/predictions.parquet`.
+
+## 2026-05-22 18:52 HKT Unseen Cell Representation/Loss Exploration
+
+- 在 clean `v2.2beta` 上创建实验分支 `exp/unseen-cell-representation-20260522`，保留 `924688e v2.2beta` 作为回退点。
+- 新增默认关闭的 expression/cell 表征实验开关：
+  - `--protein-concat-mode {off,pcep,pcep_cell,pcep_dual}`，其中 `pcep_cell` 用 control-expression hidden 查询 protein-expression pooling，`pcep_dual` 同时保留原 context query 和 expression query；
+  - `--protein-concat-score-mode {multiply,additive,magnitude}` 与 `--protein-concat-expr-scale`，用于替换 PCEP 中 expression 与 protein attention score 的融合方式；
+  - `--aux-covariate-loss-fields`、`--aux-covariate-loss-weight`、`--aux-covariate-loss-label-smoothing`，从 expression hidden 预测指定 covariate，作为 cell/cell-type auxiliary classification loss；
+  - `scripts/ptv3_experiment_common.sh` 增加上述参数和 covariate UNK env passthrough，默认全部关闭或保持旧值。
+- 校验：
+  - `python -m py_compile train.py infer.py model/fast_delta_model.py model/fast_lightning.py` 通过；
+  - `bash -n scripts/ptv3_experiment_common.sh scripts/exp_02_single_cell_type_5fold.sh scripts/exp_03_single_cell_5fold.sh` 通过；
+  - `pcep_dual + additive + aux cell_type` fast dry-run 前向通过，输出 expression/logit shape 正常。
+- 完成 unseen cell 5-fold 实验（1 GPU、batch size 256、logger off、full covariate UNK dropout `0.15` unless noted）：
+  - `pcep_dual + additive + topk1024`：AUROC `0.928647`，AUPRC `0.753787`；
+  - `pcep_cell + additive + topk512`：AUROC `0.926901`，AUPRC `0.752784`；
+  - 原 PCEP 改 `additive` scoring：AUROC `0.925741`，AUPRC `0.749050`；
+  - 原 PCEP 改 `magnitude` scoring：AUROC `0.927705`，AUPRC `0.740845`；
+  - auxiliary `cell_type` loss weight `0.05`：AUROC `0.929050`，AUPRC `0.750566`；
+  - auxiliary `cell_type` loss weight `0.01`：AUROC `0.928162`，AUPRC `0.725546`；
+  - `hidden_dim=512`、`expression_latent_dim=768`：AUROC `0.929532`，AUPRC `0.754120`；
+  - `hidden_dim=512`、`expression_latent_dim=768`、LR `2e-4`：AUROC `0.928268`，AUPRC `0.715438`；
+  - control-expression direct logit scale `0.5`：AUROC `0.926991`，AUPRC `0.756559`；
+  - control-expression direct logit scale `1.0`：AUROC `0.928378`，AUPRC `0.751017`。
+- Loss-weight sweep:
+  - current-code baseline rerun `MSE_WEIGHT=0.10`：AUROC `0.930024`，AUPRC `0.749969`；
+  - `MSE_WEIGHT=0.05`：AUROC `0.931399`，AUPRC `0.762206`;
+  - `MSE_WEIGHT=0.075`：AUROC `0.934443`，AUPRC `0.767008`;
+  - `MSE_WEIGHT=0.20`：AUROC `0.932208`，AUPRC `0.761342`;
+  - `MSE_WEIGHT=0.075` + drop `Cell` covariate：AUROC `0.929343`，AUPRC `0.744766`，不采用。
+- 对 unseen cell type 的确认实验：
+  - full covariate UNK dropout `0.15` + `MSE_WEIGHT=0.075`：AUROC `0.941852`，AUPRC `0.810250`，低于前一轮 cell-type best `0.814780/0.815947`，因此 cell type 仍建议保留 `MSE_WEIGHT=0.10`。
+- 当前结论：
+  - 直接增强 expression fusion、增大模型容量、或加入 cell-type auxiliary classification 都没有提升 unseen cell；
+  - unseen cell 当前最可靠的小幅提升来自 `MSE_WEIGHT=0.075`，AUPRC `0.767008`，比历史 full covariate UNK + `MSE_WEIGHT=0.10` 的 `0.761629` 高约 `+0.0054`；
+  - 该设置不适合作为 cell-type 默认，cell-type 仍使用 full covariate UNK dropout `0.15` + `MSE_WEIGHT=0.10`。
