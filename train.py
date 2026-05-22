@@ -658,6 +658,31 @@ def fast_covariate_model_sizes(args: argparse.Namespace, artifacts: FastTraining
     ]
 
 
+def fast_aux_covariate_indices(args: argparse.Namespace) -> list[int]:
+    if float(getattr(args, "aux_covariate_loss_weight", 0.0)) <= 0.0:
+        return []
+    fields = list(getattr(args, "aux_covariate_loss_fields", None) or [])
+    if not fields:
+        return []
+    field_to_index = {field: index for index, field in enumerate(args.batch_cov_list)}
+    missing = [field for field in fields if field not in field_to_index]
+    if missing:
+        raise ValueError(
+            "aux covariate loss fields must be present in --batch-cov-list; "
+            f"missing={missing!r}, batch_cov_list={args.batch_cov_list!r}"
+        )
+    return [field_to_index[field] for field in fields]
+
+
+def fast_aux_covariate_sizes(
+    args: argparse.Namespace,
+    artifacts: FastTrainingReadyArtifacts,
+    covariate_model_sizes: list[int],
+) -> list[int]:
+    indices = fast_aux_covariate_indices(args)
+    return [int(covariate_model_sizes[index]) for index in indices]
+
+
 def fast_covariate_known_values(
     args: argparse.Namespace,
     artifacts: FastTrainingReadyArtifacts,
@@ -807,13 +832,16 @@ def run_fast_training(args: argparse.Namespace) -> None:
     )
     active_positive_weight = resolve_fast_positive_weight(args, artifacts, train_indices)
     active_bce_weight = 1.0 if args.bce_weight is None else float(args.bce_weight)
+    covariate_model_sizes = fast_covariate_model_sizes(args, artifacts)
+    aux_covariate_indices = fast_aux_covariate_indices(args)
+    aux_covariate_sizes = fast_aux_covariate_sizes(args, artifacts, covariate_model_sizes)
 
     model = FastDeltaDrugResponseModel(
         n_genes=int(artifacts.expression_matrix.shape[1]),
         drug_embedding_dim=int(drug_embedding.shape[1]),
         protein_embedding=protein_embedding,
         ordered_protein_index=artifacts.ordered_protein_index,
-        covariate_sizes=fast_covariate_model_sizes(args, artifacts),
+        covariate_sizes=covariate_model_sizes,
         hidden_dim=args.hidden_dim,
         expression_latent_dim=args.expression_latent_dim,
         covariate_embedding_dim=args.covariate_embedding_dim,
@@ -838,10 +866,13 @@ def run_fast_training(args: argparse.Namespace) -> None:
         protein_concat_topk=args.protein_concat_topk,
         protein_concat_init_scale=args.protein_concat_init_scale,
         protein_concat_seed=args.protein_concat_seed,
+        protein_concat_score_mode=args.protein_concat_score_mode,
+        protein_concat_expr_scale=args.protein_concat_expr_scale,
         control_logit_scale=args.control_logit_scale,
         pair_logit_scale=args.pair_logit_scale,
         target_logit_scale=args.target_logit_scale,
         covariate_logit_scale=args.covariate_logit_scale,
+        aux_covariate_sizes=aux_covariate_sizes,
         use_ddi=args.use_ddi,
         residual_expression=args.residual_expression,
         init_delta_scale=args.init_delta_scale,
@@ -863,6 +894,9 @@ def run_fast_training(args: argparse.Namespace) -> None:
         max_epochs=args.max_epochs,
         mse_gene_subsample=args.mse_gene_subsample,
         label_smoothing=args.label_smoothing,
+        aux_covariate_loss_weight=args.aux_covariate_loss_weight,
+        aux_covariate_indices=aux_covariate_indices,
+        aux_covariate_label_smoothing=args.aux_covariate_loss_label_smoothing,
     )
     load_model_state(lightning_model, args.checkpoint_path, strict=not args.allow_partial_checkpoint_load)
 
@@ -906,10 +940,16 @@ def run_fast_training(args: argparse.Namespace) -> None:
         "protein_concat_topk": args.protein_concat_topk,
         "protein_concat_init_scale": args.protein_concat_init_scale,
         "protein_concat_seed": args.protein_concat_seed,
+        "protein_concat_score_mode": args.protein_concat_score_mode,
+        "protein_concat_expr_scale": args.protein_concat_expr_scale,
         "control_logit_scale": args.control_logit_scale,
         "pair_logit_scale": args.pair_logit_scale,
         "target_logit_scale": args.target_logit_scale,
         "covariate_logit_scale": args.covariate_logit_scale,
+        "aux_covariate_loss_fields": list(args.aux_covariate_loss_fields),
+        "aux_covariate_loss_indices": list(aux_covariate_indices),
+        "aux_covariate_loss_weight": args.aux_covariate_loss_weight,
+        "aux_covariate_loss_label_smoothing": args.aux_covariate_loss_label_smoothing,
         "effective_key1": args.effective_key1,
         "effective_key2": args.effective_key2,
         "task_head": task_loss_config["task_head"],
@@ -1225,15 +1265,30 @@ def main() -> None:
         default="symmetric",
     )
     parser.add_argument("--pair-type-features", action="store_true")
-    parser.add_argument("--protein-concat-mode", choices=["off", "pcep"], default="pcep")
+    parser.add_argument("--protein-concat-mode", choices=["off", "pcep", "pcep_cell", "pcep_dual"], default="pcep")
     parser.add_argument("--protein-concat-dim", type=int, default=64)
     parser.add_argument("--protein-concat-topk", type=int, default=512)
     parser.add_argument("--protein-concat-init-scale", type=float, default=0.1)
     parser.add_argument("--protein-concat-seed", type=int, default=23)
+    parser.add_argument(
+        "--protein-concat-score-mode",
+        choices=["multiply", "additive", "magnitude"],
+        default="multiply",
+        help="How PCEP converts control expression into per-protein attention scores.",
+    )
+    parser.add_argument("--protein-concat-expr-scale", type=float, default=1.0)
     parser.add_argument("--control-logit-scale", type=float, default=0.0)
     parser.add_argument("--pair-logit-scale", type=float, default=0.0)
     parser.add_argument("--target-logit-scale", type=float, default=0.0)
     parser.add_argument("--covariate-logit-scale", type=float, default=0.0)
+    parser.add_argument(
+        "--aux-covariate-loss-fields",
+        nargs="*",
+        default=[],
+        help="Covariate fields predicted from expression hidden as auxiliary classification tasks.",
+    )
+    parser.add_argument("--aux-covariate-loss-weight", type=float, default=0.0)
+    parser.add_argument("--aux-covariate-loss-label-smoothing", type=float, default=0.0)
     parser.add_argument("--use-ddi", action="store_true")
     parser.add_argument("--absolute-expression-head", action="store_false", dest="residual_expression")
     parser.add_argument("--init-delta-scale", type=float, default=0.1)

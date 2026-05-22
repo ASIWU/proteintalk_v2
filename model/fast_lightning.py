@@ -52,6 +52,9 @@ class FastProteinTalkLightning(pl.LightningModule):
         max_epochs: int = 50,
         mse_gene_subsample: int = 0,
         label_smoothing: float = 0.0,
+        aux_covariate_loss_weight: float = 0.0,
+        aux_covariate_indices: list[int] | None = None,
+        aux_covariate_label_smoothing: float = 0.0,
     ) -> None:
         super().__init__()
         self.model = model
@@ -73,6 +76,13 @@ class FastProteinTalkLightning(pl.LightningModule):
         self.label_smoothing = float(label_smoothing)
         if not 0.0 <= self.label_smoothing < 1.0:
             raise ValueError("label_smoothing must be in [0, 1)")
+        self.aux_covariate_loss_weight = float(aux_covariate_loss_weight)
+        if self.aux_covariate_loss_weight < 0.0:
+            raise ValueError("aux_covariate_loss_weight must be non-negative")
+        self.aux_covariate_indices = list(aux_covariate_indices or [])
+        self.aux_covariate_label_smoothing = float(aux_covariate_label_smoothing)
+        if not 0.0 <= self.aux_covariate_label_smoothing < 1.0:
+            raise ValueError("aux_covariate_label_smoothing must be in [0, 1)")
         pos_weight_value = 1.0 if positive_weight is None else float(positive_weight)
         self.register_buffer("positive_weight", torch.tensor(pos_weight_value, dtype=torch.float32))
         self.validation_outputs: list[dict[str, torch.Tensor]] = []
@@ -90,19 +100,42 @@ class FastProteinTalkLightning(pl.LightningModule):
     def _losses(
         self,
         batch: dict[str, torch.Tensor],
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        expression_pred, response_logits, synergy_logits = self(batch)
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        outputs = self(batch)
+        expression_pred, response_logits, synergy_logits = outputs[:3]
+        aux_outputs = outputs[3] if len(outputs) > 3 else []
         expression_true = batch["perturb_expression"].float()
         label, mask, _ = self._active_label_and_mask(batch)
         loss1 = self._mse_loss(expression_pred, expression_true, mask)
         task_logits = synergy_logits.squeeze(-1) if self.task_head == "synergy" else response_logits.squeeze(-1)
         inactive_logits = response_logits if self.task_head == "synergy" else synergy_logits
         loss2 = self._masked_bce(task_logits, label, mask)
+        aux_loss = self._aux_covariate_loss(batch, aux_outputs)
         total = self.bce_weight * loss2
         if self.have_mse_loss:
             total = total + self.mse_weight * loss1
+        if self.aux_covariate_loss_weight > 0.0:
+            total = total + self.aux_covariate_loss_weight * aux_loss
         total = total + inactive_logits.sum() * 0.0 + expression_pred.sum() * 0.0
-        return total, loss1, loss2, expression_pred, response_logits, synergy_logits
+        return total, loss1, loss2, aux_loss, expression_pred, response_logits, synergy_logits
+
+    def _aux_covariate_loss(self, batch: dict[str, torch.Tensor], aux_outputs: list[torch.Tensor]) -> torch.Tensor:
+        if self.aux_covariate_loss_weight <= 0.0 or not self.aux_covariate_indices or not aux_outputs:
+            return batch["control_expression"].new_tensor(0.0)
+        covariates = batch["covariates"].long()
+        losses = []
+        for logits, covariate_index in zip(aux_outputs, self.aux_covariate_indices, strict=True):
+            target = covariates[:, int(covariate_index)].clamp(min=0, max=logits.shape[-1] - 1).to(logits.device)
+            losses.append(
+                F.cross_entropy(
+                    logits,
+                    target,
+                    label_smoothing=self.aux_covariate_label_smoothing,
+                )
+            )
+        if not losses:
+            return batch["control_expression"].new_tensor(0.0)
+        return torch.stack(losses).mean()
 
     def _mse_loss(
         self,
@@ -149,28 +182,39 @@ class FastProteinTalkLightning(pl.LightningModule):
         return (raw * weights.reshape(-1)).sum() / weights.sum().clamp_min(1.0)
 
     def training_step(self, batch: dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
-        total, loss1, loss2, _, _, _ = self._losses(batch)
+        total, loss1, loss2, aux_loss, _, _, _ = self._losses(batch)
         self.log("train/total_loss", total, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
         self.log("train/loss1", loss1, on_step=True, on_epoch=True, prog_bar=False, sync_dist=True)
         self.log("train/loss2", loss2, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
+        if self.aux_covariate_loss_weight > 0.0:
+            self.log("train/aux_covariate_loss", aux_loss, on_step=True, on_epoch=True, prog_bar=False, sync_dist=True)
         return total
 
     def validation_step(self, batch: dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
-        total, loss1, loss2, _, response_logits, synergy_logits = self._losses(batch)
-        self._log_eval_losses("val", total, loss1, loss2)
+        total, loss1, loss2, aux_loss, _, response_logits, synergy_logits = self._losses(batch)
+        self._log_eval_losses("val", total, loss1, loss2, aux_loss)
         self.validation_outputs.append(self._collect_eval(batch, response_logits, synergy_logits))
         return total
 
     def test_step(self, batch: dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
-        total, loss1, loss2, _, response_logits, synergy_logits = self._losses(batch)
-        self._log_eval_losses("test", total, loss1, loss2)
+        total, loss1, loss2, aux_loss, _, response_logits, synergy_logits = self._losses(batch)
+        self._log_eval_losses("test", total, loss1, loss2, aux_loss)
         self.test_outputs.append(self._collect_eval(batch, response_logits, synergy_logits))
         return total
 
-    def _log_eval_losses(self, prefix: str, total: torch.Tensor, loss1: torch.Tensor, loss2: torch.Tensor) -> None:
+    def _log_eval_losses(
+        self,
+        prefix: str,
+        total: torch.Tensor,
+        loss1: torch.Tensor,
+        loss2: torch.Tensor,
+        aux_loss: torch.Tensor,
+    ) -> None:
         self.log(f"{prefix}/total_loss", total, on_epoch=True, prog_bar=True, sync_dist=True)
         self.log(f"{prefix}/loss1", loss1, on_epoch=True, prog_bar=False, sync_dist=True)
         self.log(f"{prefix}/loss2", loss2, on_epoch=True, prog_bar=True, sync_dist=True)
+        if self.aux_covariate_loss_weight > 0.0:
+            self.log(f"{prefix}/aux_covariate_loss", aux_loss, on_epoch=True, prog_bar=False, sync_dist=True)
 
     def _collect_eval(
         self,

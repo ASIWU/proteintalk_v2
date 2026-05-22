@@ -105,10 +105,13 @@ class FastDeltaDrugResponseModel(nn.Module):
         protein_concat_topk: int = 512,
         protein_concat_init_scale: float = 0.1,
         protein_concat_seed: int = 23,
+        protein_concat_score_mode: str = "multiply",
+        protein_concat_expr_scale: float = 1.0,
         control_logit_scale: float = 0.0,
         pair_logit_scale: float = 0.0,
         target_logit_scale: float = 0.0,
         covariate_logit_scale: float = 0.0,
+        aux_covariate_sizes: list[int] | None = None,
         use_ddi: bool = False,
         residual_expression: bool = True,
         init_delta_scale: float = 0.1,
@@ -136,10 +139,14 @@ class FastDeltaDrugResponseModel(nn.Module):
             raise ValueError("pair_fusion_mode must be symmetric, rich_symmetric, ordered_concat, or dual")
         self.pair_type_features = bool(pair_type_features)
         self.protein_concat_mode = str(protein_concat_mode).lower()
-        if self.protein_concat_mode not in {"off", "pcep"}:
-            raise ValueError("protein_concat_mode must be off or pcep")
+        if self.protein_concat_mode not in {"off", "pcep", "pcep_cell", "pcep_dual"}:
+            raise ValueError("protein_concat_mode must be off, pcep, pcep_cell, or pcep_dual")
         self.protein_concat_dim = int(protein_concat_dim)
         self.protein_concat_topk = int(protein_concat_topk)
+        self.protein_concat_score_mode = str(protein_concat_score_mode).lower()
+        if self.protein_concat_score_mode not in {"multiply", "additive", "magnitude"}:
+            raise ValueError("protein_concat_score_mode must be multiply, additive, or magnitude")
+        self.protein_concat_expr_scale = float(protein_concat_expr_scale)
         self.control_logit_scale = float(control_logit_scale)
         self.pair_logit_scale = float(pair_logit_scale)
         self.target_logit_scale = float(target_logit_scale)
@@ -155,7 +162,7 @@ class FastDeltaDrugResponseModel(nn.Module):
         self.target_pad_index = int(protein_embedding.shape[0])
         if ordered_protein_index is None:
             ordered_protein_index = list(range(self.n_genes)) if self.n_genes <= protein_embedding.shape[0] else None
-        if self.protein_concat_mode == "pcep":
+        if self.protein_concat_mode != "off":
             if ordered_protein_index is None or len(ordered_protein_index) != self.n_genes:
                 raise ValueError("PCEP requires ordered_protein_index with one entry per expression gene")
             ordered = np.asarray(ordered_protein_index, dtype=np.int64)
@@ -173,10 +180,20 @@ class FastDeltaDrugResponseModel(nn.Module):
                 torch.tensor(expression_protein_features, dtype=torch.float32),
                 persistent=False,
             )
-            self.pcep_context_proj = nn.Linear(hidden_dim * 3, self.protein_concat_dim)
-            self.pcep_norm = nn.LayerNorm(self.protein_concat_dim)
+            self.pcep_context_proj = (
+                nn.Linear(hidden_dim * 3, self.protein_concat_dim)
+                if self.protein_concat_mode in {"pcep", "pcep_dual"}
+                else None
+            )
+            self.pcep_cell_proj = (
+                nn.Linear(hidden_dim, self.protein_concat_dim)
+                if self.protein_concat_mode in {"pcep_cell", "pcep_dual"}
+                else None
+            )
+            pcep_input_dim = self.protein_concat_dim * (2 if self.protein_concat_mode == "pcep_dual" else 1)
+            self.pcep_norm = nn.LayerNorm(pcep_input_dim)
             self.pcep_out = make_mlp(
-                self.protein_concat_dim,
+                pcep_input_dim,
                 hidden_dim,
                 hidden_dim,
                 dropout=dropout,
@@ -187,6 +204,7 @@ class FastDeltaDrugResponseModel(nn.Module):
         else:
             self.register_buffer("expression_protein_features", torch.empty(0), persistent=False)
             self.pcep_context_proj = None
+            self.pcep_cell_proj = None
             self.pcep_norm = None
             self.pcep_out = None
             self.pcep_scale = None
@@ -339,6 +357,18 @@ class FastDeltaDrugResponseModel(nn.Module):
             dropout,
             self.covariate_logit_scale,
         )
+        self.aux_covariate_heads = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.LayerNorm(hidden_dim),
+                    nn.Linear(hidden_dim, head_hidden),
+                    nn.GELU(),
+                    nn.Dropout(dropout),
+                    nn.Linear(head_hidden, int(size)),
+                )
+                for size in (aux_covariate_sizes or [])
+            ]
+        )
         self.graph_response_head = (
             nn.Sequential(
                 nn.LayerNorm(hidden_dim),
@@ -366,13 +396,20 @@ class FastDeltaDrugResponseModel(nn.Module):
         control_expression = torch.nan_to_num(batch["control_expression"].float(), nan=0.0, posinf=0.0, neginf=0.0)
         normalized_control = self.control_norm(control_expression)
         control_hidden = self.control_encoder(normalized_control)
+        expression_hidden = control_hidden
         graph_features = batch["graph_features"].float() if self.graph_feature_dim > 0 else None
         graph_feature_mask = batch["graph_feature_mask"].float() if self.graph_feature_dim > 0 else None
         pair_hidden = self._encode_drug_pair(batch["drug_embeddings"].float(), graph_features, batch.get("drug_indices"))
         target_hidden = self._encode_targets(batch["target_indices"].long(), batch["target_mask"].float())
         covariate_hidden = self._encode_covariates(batch["covariates"].long(), device=control_expression.device)
-        if self.protein_concat_mode == "pcep":
-            pcep_hidden = self._encode_protein_concat(normalized_control, pair_hidden, target_hidden, covariate_hidden)
+        if self.protein_concat_mode != "off":
+            pcep_hidden = self._encode_protein_concat(
+                normalized_control,
+                expression_hidden,
+                pair_hidden,
+                target_hidden,
+                covariate_hidden,
+            )
             control_hidden = control_hidden + pcep_hidden
         pieces = [control_hidden, pair_hidden, target_hidden, covariate_hidden]
         graph_hidden = None
@@ -443,7 +480,8 @@ class FastDeltaDrugResponseModel(nn.Module):
                 raise RuntimeError("graph logit heads were not initialized")
             response_logits = response_logits + self.graph_logit_scale * self.graph_response_head(graph_hidden)
             synergy_logits = synergy_logits + self.graph_logit_scale * self.graph_synergy_head(graph_hidden)
-        return expression_pred, response_logits, synergy_logits
+        aux_outputs = [head(expression_hidden) for head in self.aux_covariate_heads]
+        return expression_pred, response_logits, synergy_logits, aux_outputs
 
     def _make_aux_logit_heads(
         self,
@@ -603,17 +641,46 @@ class FastDeltaDrugResponseModel(nn.Module):
     def _encode_protein_concat(
         self,
         normalized_expression: torch.Tensor,
+        expression_hidden: torch.Tensor,
         pair_hidden: torch.Tensor,
         target_hidden: torch.Tensor,
         covariate_hidden: torch.Tensor,
     ) -> torch.Tensor:
-        if self.pcep_context_proj is None or self.pcep_norm is None or self.pcep_out is None or self.pcep_scale is None:
+        if self.pcep_norm is None or self.pcep_out is None or self.pcep_scale is None:
             raise RuntimeError("PCEP was not initialized")
         protein_features = self.expression_protein_features.to(normalized_expression.device, dtype=normalized_expression.dtype)
-        context = torch.cat([pair_hidden, target_hidden, covariate_hidden], dim=-1)
-        query = self.pcep_context_proj(context).to(normalized_expression.dtype)
+        pooled_parts = []
+        if self.protein_concat_mode in {"pcep", "pcep_dual"}:
+            if self.pcep_context_proj is None:
+                raise RuntimeError("PCEP context projection was not initialized")
+            context = torch.cat([pair_hidden, target_hidden, covariate_hidden], dim=-1)
+            query = self.pcep_context_proj(context).to(normalized_expression.dtype)
+            pooled_parts.append(self._pool_expression_proteins(query, normalized_expression, protein_features))
+        if self.protein_concat_mode in {"pcep_cell", "pcep_dual"}:
+            if self.pcep_cell_proj is None:
+                raise RuntimeError("PCEP cell projection was not initialized")
+            query = self.pcep_cell_proj(expression_hidden).to(normalized_expression.dtype)
+            pooled_parts.append(self._pool_expression_proteins(query, normalized_expression, protein_features))
+        pooled = torch.cat(pooled_parts, dim=-1) if len(pooled_parts) > 1 else pooled_parts[0]
+        pooled = self.pcep_norm(pooled)
+        return self.pcep_scale.to(pooled.dtype) * self.pcep_out(pooled)
+
+    def _pool_expression_proteins(
+        self,
+        query: torch.Tensor,
+        normalized_expression: torch.Tensor,
+        protein_features: torch.Tensor,
+    ) -> torch.Tensor:
         scores = (query @ protein_features.t()) / math.sqrt(max(1, protein_features.shape[1]))
-        scores = scores * normalized_expression + self.pcep_score_bias.to(scores.device, scores.dtype)
+        if self.protein_concat_score_mode == "multiply":
+            scores = scores * normalized_expression
+        elif self.protein_concat_score_mode == "additive":
+            scores = scores + self.protein_concat_expr_scale * normalized_expression
+        elif self.protein_concat_score_mode == "magnitude":
+            scores = scores + self.protein_concat_expr_scale * normalized_expression.abs()
+        else:
+            raise RuntimeError(f"unsupported protein_concat_score_mode: {self.protein_concat_score_mode!r}")
+        scores = scores + self.pcep_score_bias.to(scores.device, scores.dtype)
         if self.protein_concat_topk > 0 and self.protein_concat_topk < scores.shape[1]:
             top_scores, top_idx = torch.topk(scores, k=self.protein_concat_topk, dim=1)
             weights = torch.softmax(top_scores, dim=1)
@@ -624,8 +691,7 @@ class FastDeltaDrugResponseModel(nn.Module):
         else:
             weights = torch.softmax(scores, dim=1)
             pooled = (weights * normalized_expression) @ protein_features
-        pooled = self.pcep_norm(pooled)
-        return self.pcep_scale.to(pooled.dtype) * self.pcep_out(pooled)
+        return pooled
 
     def _encode_targets(self, target_indices: torch.Tensor, target_mask: torch.Tensor) -> torch.Tensor:
         protein_embedding = self.protein_embedding.to(target_indices.device)

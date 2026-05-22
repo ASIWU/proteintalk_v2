@@ -246,6 +246,8 @@ LEGACY_FAST_MANIFEST_DEFAULTS = {
     "pair_type_features": False,
     "protein_concat_init_scale": 0.1,
     "protein_concat_seed": 23,
+    "protein_concat_score_mode": "multiply",
+    "protein_concat_expr_scale": 1.0,
     "control_logit_scale": 0.0,
     "pair_logit_scale": 0.0,
     "target_logit_scale": 0.0,
@@ -287,6 +289,8 @@ def current_fast_model_config(args) -> dict[str, object]:
         "protein_concat_topk": args.protein_concat_topk,
         "protein_concat_init_scale": args.protein_concat_init_scale,
         "protein_concat_seed": args.protein_concat_seed,
+        "protein_concat_score_mode": args.protein_concat_score_mode,
+        "protein_concat_expr_scale": args.protein_concat_expr_scale,
         "control_logit_scale": args.control_logit_scale,
         "pair_logit_scale": args.pair_logit_scale,
         "target_logit_scale": args.target_logit_scale,
@@ -545,6 +549,8 @@ def run_fast_inference(args) -> None:
         protein_concat_topk=args.protein_concat_topk,
         protein_concat_init_scale=args.protein_concat_init_scale,
         protein_concat_seed=args.protein_concat_seed,
+        protein_concat_score_mode=args.protein_concat_score_mode,
+        protein_concat_expr_scale=args.protein_concat_expr_scale,
         control_logit_scale=args.control_logit_scale,
         pair_logit_scale=args.pair_logit_scale,
         target_logit_scale=args.target_logit_scale,
@@ -579,7 +585,8 @@ def run_fast_inference(args) -> None:
             if args.limit_batches is not None and batch_idx >= args.limit_batches:
                 break
             batch = move_to_device(batch, device)
-            expression, logits1, logits2 = lightning_model(batch)
+            outputs = lightning_model(batch)
+            expression, logits1, logits2 = outputs[:3]
             prob1.append(torch.sigmoid(logits1.squeeze(-1)).detach().cpu().numpy())
             prob2.append(torch.sigmoid(logits2.squeeze(-1)).detach().cpu().numpy())
             true1_chunks.append(batch["label1"].detach().cpu().numpy())
@@ -810,11 +817,13 @@ def main() -> None:
         default="symmetric",
     )
     parser.add_argument("--pair-type-features", action="store_true")
-    parser.add_argument("--protein-concat-mode", choices=["off", "pcep"], default="pcep")
+    parser.add_argument("--protein-concat-mode", choices=["off", "pcep", "pcep_cell", "pcep_dual"], default="pcep")
     parser.add_argument("--protein-concat-dim", type=int, default=64)
     parser.add_argument("--protein-concat-topk", type=int, default=512)
     parser.add_argument("--protein-concat-init-scale", type=float, default=0.1)
     parser.add_argument("--protein-concat-seed", type=int, default=23)
+    parser.add_argument("--protein-concat-score-mode", choices=["multiply", "additive", "magnitude"], default="multiply")
+    parser.add_argument("--protein-concat-expr-scale", type=float, default=1.0)
     parser.add_argument("--control-logit-scale", type=float, default=0.0)
     parser.add_argument("--pair-logit-scale", type=float, default=0.0)
     parser.add_argument("--target-logit-scale", type=float, default=0.0)
