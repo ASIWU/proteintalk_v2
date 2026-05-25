@@ -44,6 +44,7 @@ from model.graph_feature_utils import build_or_load_graph_features
 from model.training_ready_lightning import ProteinTalkLightning, binary_metrics, compute_validation_metrics
 from model.training_ready_models import FAST_DELTA_MODEL_NAME, GRAPH_MODEL_NAMES, ModelArtifacts, SELECTED_MODEL_NAMES, build_model
 from train import (
+    build_fast_target_expression_weights,
     category_sizes,
     default_derived_paths,
     graph_feature_blocks_from_meta,
@@ -244,6 +245,15 @@ LEGACY_FAST_MANIFEST_DEFAULTS = {
     "graph_jump_temperature": 1.0,
     "pair_fusion_mode": "symmetric",
     "pair_type_features": False,
+    "cell_pair_film_scale": 0.0,
+    "target_expression_mode": "off",
+    "target_expression_dim": 64,
+    "target_expression_topk": 256,
+    "target_expression_ppi_topk": 32,
+    "target_expression_ppi_alpha": 0.5,
+    "target_expression_init_scale": 0.1,
+    "target_expression_seed": 29,
+    "target_expression_fusion_mode": "piece",
     "protein_concat_init_scale": 0.1,
     "protein_concat_seed": 23,
     "protein_concat_score_mode": "multiply",
@@ -284,6 +294,15 @@ def current_fast_model_config(args) -> dict[str, object]:
         "graph_jump_temperature": args.graph_jump_temperature,
         "pair_fusion_mode": args.pair_fusion_mode,
         "pair_type_features": args.pair_type_features,
+        "cell_pair_film_scale": args.cell_pair_film_scale,
+        "target_expression_mode": args.target_expression_mode,
+        "target_expression_dim": args.target_expression_dim,
+        "target_expression_topk": args.target_expression_topk,
+        "target_expression_ppi_topk": args.target_expression_ppi_topk,
+        "target_expression_ppi_alpha": args.target_expression_ppi_alpha,
+        "target_expression_init_scale": args.target_expression_init_scale,
+        "target_expression_seed": args.target_expression_seed,
+        "target_expression_fusion_mode": args.target_expression_fusion_mode,
         "protein_concat_mode": args.protein_concat_mode,
         "protein_concat_dim": args.protein_concat_dim,
         "protein_concat_topk": args.protein_concat_topk,
@@ -492,6 +511,14 @@ def run_fast_inference(args) -> None:
             include_multihop=args.graph_multihop,
             force_rebuild=args.force_graph_cache_rebuild,
         )
+    target_expression_weight_matrix, target_expression_summary = build_fast_target_expression_weights(
+        args=args,
+        artifacts=artifacts,
+        pdi_matrix_path=pdi_matrix_path,
+        ppi_matrix_path=ppi_matrix_path,
+        ordered_protein_index=checkpoint_axis,
+        cache_task_name=str(checkpoint_manifest.get("task_name") or args.task_name),
+    )
     ddi_matrix = np.load(ddi_matrix_path, mmap_mode="r") if args.use_ddi else None
     indices, row_to_set, set_info, split_dir = resolve_fast_inference_indices(args, artifacts)
     covariate_unknown_indices = fast_checkpoint_covariate_unknown_indices(
@@ -544,6 +571,13 @@ def run_fast_inference(args) -> None:
         graph_jump_temperature=args.graph_jump_temperature,
         pair_fusion_mode=args.pair_fusion_mode,
         pair_type_features=args.pair_type_features,
+        cell_pair_film_scale=args.cell_pair_film_scale,
+        target_expression_mode=args.target_expression_mode,
+        target_expression_weight_matrix=target_expression_weight_matrix,
+        target_expression_dim=args.target_expression_dim,
+        target_expression_init_scale=args.target_expression_init_scale,
+        target_expression_seed=args.target_expression_seed,
+        target_expression_fusion_mode=args.target_expression_fusion_mode,
         protein_concat_mode=args.protein_concat_mode,
         protein_concat_dim=args.protein_concat_dim,
         protein_concat_topk=args.protein_concat_topk,
@@ -721,6 +755,7 @@ def run_fast_inference(args) -> None:
             "limit_batches": args.limit_batches,
             "graph_feature_mode": args.graph_feature_mode,
             "graph_feature_meta": graph_feature_meta,
+            "target_expression_summary": target_expression_summary,
             "covariate_unk_fields": list(covariate_unknown_indices),
         },
     )
@@ -817,6 +852,22 @@ def main() -> None:
         default="symmetric",
     )
     parser.add_argument("--pair-type-features", action="store_true")
+    parser.add_argument("--cell-pair-film-scale", type=float, default=0.0)
+    parser.add_argument("--target-expression-mode", choices=["off", "pdi", "pdi_ppi"], default="off")
+    parser.add_argument("--target-expression-dim", type=int, default=64)
+    parser.add_argument("--target-expression-topk", type=int, default=256)
+    parser.add_argument("--target-expression-ppi-topk", type=int, default=32)
+    parser.add_argument("--target-expression-ppi-alpha", type=float, default=0.5)
+    parser.add_argument("--target-expression-init-scale", type=float, default=0.1)
+    parser.add_argument("--target-expression-seed", type=int, default=29)
+    parser.add_argument(
+        "--target-expression-fusion-mode",
+        choices=["piece", "control_add", "pair_add"],
+        default="piece",
+    )
+    parser.add_argument("--target-expression-chunk-size", type=int, default=64)
+    parser.add_argument("--target-expression-cache-dir", default="")
+    parser.add_argument("--force-target-expression-cache-rebuild", action="store_true")
     parser.add_argument("--protein-concat-mode", choices=["off", "pcep", "pcep_cell", "pcep_dual"], default="pcep")
     parser.add_argument("--protein-concat-dim", type=int, default=64)
     parser.add_argument("--protein-concat-topk", type=int, default=512)

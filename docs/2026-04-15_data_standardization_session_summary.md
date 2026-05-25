@@ -1536,3 +1536,30 @@ python utils/01_validate_standardized_outputs.py
   - unseen drug fold0 has almost no unseen covariate categories in test, except tiny `Cell_plate`/`batch` tails;
   - unseen cell fold0 has severe covariate shift: `Cell_plate` and `Cell` test rows are `100%` train-unseen, `batch` test rows are `91.67%` train-unseen, and `cell_type` test rows are `27.25%` train-unseen;
   - this supports treating high-cardinality technical covariates as risky in unseen-cell evaluation.
+
+## 2026-05-25 17:22 HKT Target-Expression and FiLM Unseen-Cell Iteration
+
+- Added default-off PDI/PPI-guided target-expression context for the fast model:
+  - `--target-expression-mode {off,pdi,pdi_ppi}` builds a cached drug-by-expression-gene weight matrix from existing `pdi_matrix.npy` and optional one-hop `ppi_matrix.npy`;
+  - the model converts the cached dense weights into sparse top-k `(gene_index, weight)` buffers, then pools control expression over drug-specific target/neighborhood proteins;
+  - fusion is configurable with `--target-expression-fusion-mode {piece,control_add,pair_add}`; the branch is zero-initialized so enabled runs start close to baseline;
+  - no data-processing code or source data files were modified.
+- Added parameter plumbing to `train.py`, `infer.py`, and `scripts/ptv3_experiment_common.sh`; defaults keep previous baseline behavior unchanged (`target_expression_mode=off`, `cell_pair_film_scale=0`).
+- Inference-side target-expression weights are built on the checkpoint protein axis, so extra-data inference can still align expression columns to the training checkpoint axis.
+- Added reproducibility scripts:
+  - `scripts/run_unseen_cell_targetexpr_film_fold0_2gpu.sh` for fold0 method1/method2 screening;
+  - `scripts/run_unseen_cell_targetexpr_pairadd_5fold_2gpu.sh` for the best target-expression pair-add 5-fold setting.
+- Fold0 screening on `single_cell_5fold_fold0`, 1 GPU, batch size 256, full covariate UNK dropout `0.15`, `MSE_WEIGHT=0.075`:
+  - fresh baseline: AUROC `0.914478`, AUPRC `0.846185`;
+  - FiLM-only was negative across scales: best tested AUPRC `0.834991`;
+  - target-expression as extra fusion piece was negative: best tested AUPRC `0.837257` after zero-init;
+  - target-expression `control_add` was below baseline: best tested AUPRC `0.840263`;
+  - target-expression `pair_add` was the only positive fold0 variant: AUROC `0.922204`, AUPRC `0.847389`.
+- Full 5-fold result for best method1 setting (`TARGET_EXPRESSION_MODE=pdi_ppi`, `TARGET_EXPRESSION_FUSION_MODE=pair_add`, top-k `256`, PPI top-k `32`, PPI alpha `0.5`, init scale `0.5`):
+  - fold AUPRCs: `0.84739 + 0.75910 + 0.66351 + 0.81629 + 0.78267`;
+  - average AUROC/AUPRC: `0.932174 / 0.773791`;
+  - compared with the current full covariate UNK + `MSE_WEIGHT=0.075` unseen-cell baseline (`0.934443 / 0.767008`), AUPRC improves by about `+0.0068` while AUROC drops by about `-0.0023`.
+- Current conclusion:
+  - method2 (`cell_pair_film`) should not be adopted for unseen cell;
+  - method1 is only useful in the conservative `pair_add` form and gives a small AUPRC gain, not enough to solve the `0.85` target;
+  - recommended status is optional ablation / candidate unseen-cell setting, not a global default for every task.

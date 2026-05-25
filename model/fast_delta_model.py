@@ -109,6 +109,12 @@ class FastDeltaDrugResponseModel(nn.Module):
         pair_fusion_mode: str = "symmetric",
         pair_type_features: bool = False,
         cell_pair_film_scale: float = 0.0,
+        target_expression_mode: str = "off",
+        target_expression_weight_matrix: np.ndarray | None = None,
+        target_expression_dim: int = 64,
+        target_expression_init_scale: float = 0.1,
+        target_expression_seed: int = 29,
+        target_expression_fusion_mode: str = "piece",
         protein_concat_mode: str = "off",
         protein_concat_dim: int = 64,
         protein_concat_topk: int = 512,
@@ -154,6 +160,16 @@ class FastDeltaDrugResponseModel(nn.Module):
         self.cell_pair_film_scale = float(cell_pair_film_scale)
         if self.cell_pair_film_scale < 0.0:
             raise ValueError("cell_pair_film_scale must be non-negative")
+        self.target_expression_mode = str(target_expression_mode).lower()
+        if self.target_expression_mode not in {"off", "pdi", "pdi_ppi"}:
+            raise ValueError("target_expression_mode must be off, pdi, or pdi_ppi")
+        self.target_expression_enabled = self.target_expression_mode != "off"
+        self.target_expression_dim = int(target_expression_dim)
+        if self.target_expression_enabled and self.target_expression_dim <= 0:
+            raise ValueError("target_expression_dim must be positive when target expression is enabled")
+        self.target_expression_fusion_mode = str(target_expression_fusion_mode).lower()
+        if self.target_expression_fusion_mode not in {"piece", "control_add", "pair_add"}:
+            raise ValueError("target_expression_fusion_mode must be piece, control_add, or pair_add")
         self.protein_concat_mode = str(protein_concat_mode).lower()
         if self.protein_concat_mode not in {"off", "pcep", "pcep_cell", "pcep_dual"}:
             raise ValueError("protein_concat_mode must be off, pcep, pcep_cell, or pcep_dual")
@@ -186,6 +202,89 @@ class FastDeltaDrugResponseModel(nn.Module):
         self.target_pad_index = int(protein_embedding.shape[0])
         if ordered_protein_index is None:
             ordered_protein_index = list(range(self.n_genes)) if self.n_genes <= protein_embedding.shape[0] else None
+        if self.target_expression_enabled:
+            if ordered_protein_index is None or len(ordered_protein_index) != self.n_genes:
+                raise ValueError("target expression context requires ordered_protein_index with one entry per expression gene")
+            if target_expression_weight_matrix is None:
+                raise ValueError("target_expression_weight_matrix is required when target expression context is enabled")
+            target_expression_weight_matrix = np.asarray(target_expression_weight_matrix)
+            if target_expression_weight_matrix.ndim != 2 or target_expression_weight_matrix.shape[1] != self.n_genes:
+                raise ValueError(
+                    "target_expression_weight_matrix must have shape [n_drugs, n_genes]; "
+                    f"got {target_expression_weight_matrix.shape}, expected second dim {self.n_genes}"
+                )
+            self.target_expression_drug_count = int(target_expression_weight_matrix.shape[0])
+            ordered = np.asarray(ordered_protein_index, dtype=np.int64)
+            if ordered.min(initial=0) < 0 or ordered.max(initial=0) >= protein_embedding.shape[0]:
+                raise ValueError("ordered_protein_index contains values outside protein_embedding")
+            target_projection = _random_projection(
+                self.protein_embedding_dim,
+                self.target_expression_dim,
+                seed=target_expression_seed,
+            )
+            target_expression_protein_features = np.nan_to_num(
+                protein_embedding[ordered] @ target_projection,
+                nan=0.0,
+                posinf=0.0,
+                neginf=0.0,
+            ).astype(np.float32)
+            target_expression_weight_matrix = np.nan_to_num(
+                target_expression_weight_matrix.astype(np.float32, copy=False),
+                nan=0.0,
+                posinf=0.0,
+                neginf=0.0,
+            )
+            positive_counts = np.count_nonzero(target_expression_weight_matrix > 0.0, axis=1)
+            max_positive_count = int(positive_counts.max(initial=0))
+            if 0 < max_positive_count < self.n_genes:
+                top_idx = np.argpartition(-target_expression_weight_matrix, kth=max_positive_count - 1, axis=1)[
+                    :, :max_positive_count
+                ]
+                top_values = np.take_along_axis(target_expression_weight_matrix, top_idx, axis=1)
+                top_values = np.where(top_values > 0.0, top_values, 0.0)
+                self.register_buffer(
+                    "target_expression_indices",
+                    torch.tensor(top_idx.astype(np.int64, copy=False), dtype=torch.long),
+                    persistent=False,
+                )
+                self.register_buffer(
+                    "target_expression_values",
+                    torch.tensor(top_values.astype(np.float16, copy=False), dtype=torch.float16),
+                    persistent=False,
+                )
+                self.register_buffer("target_expression_weights", torch.empty(0), persistent=False)
+            else:
+                self.register_buffer(
+                    "target_expression_weights",
+                    torch.tensor(target_expression_weight_matrix.astype(np.float16, copy=False), dtype=torch.float16),
+                    persistent=False,
+                )
+                self.register_buffer("target_expression_indices", torch.empty(0, dtype=torch.long), persistent=False)
+                self.register_buffer("target_expression_values", torch.empty(0), persistent=False)
+            self.register_buffer(
+                "target_expression_protein_features",
+                torch.tensor(target_expression_protein_features, dtype=torch.float32),
+                persistent=False,
+            )
+            self.target_expression_encoder = make_mlp(
+                self.target_expression_dim * 3,
+                hidden_dim,
+                hidden_dim,
+                dropout=dropout,
+                layers=2,
+            )
+            _zero_init_last_linear(self.target_expression_encoder)
+            self.target_expression_scale = nn.Parameter(
+                torch.tensor(float(target_expression_init_scale), dtype=torch.float32)
+            )
+        else:
+            self.target_expression_drug_count = 0
+            self.register_buffer("target_expression_weights", torch.empty(0), persistent=False)
+            self.register_buffer("target_expression_indices", torch.empty(0, dtype=torch.long), persistent=False)
+            self.register_buffer("target_expression_values", torch.empty(0), persistent=False)
+            self.register_buffer("target_expression_protein_features", torch.empty(0), persistent=False)
+            self.target_expression_encoder = None
+            self.target_expression_scale = None
         if self.protein_concat_mode != "off":
             if ordered_protein_index is None or len(ordered_protein_index) != self.n_genes:
                 raise ValueError("PCEP requires ordered_protein_index with one entry per expression gene")
@@ -339,7 +438,11 @@ class FastDeltaDrugResponseModel(nn.Module):
         )
 
         fusion_input_dim = hidden_dim * (
-            4 + int(self.use_ddi) + int(self.graph_feature_dim > 0) + int(self.prior_feature_dim > 0)
+            4
+            + int(self.target_expression_enabled and self.target_expression_fusion_mode == "piece")
+            + int(self.use_ddi)
+            + int(self.graph_feature_dim > 0)
+            + int(self.prior_feature_dim > 0)
         )
         self.fusion = make_mlp(
             fusion_input_dim,
@@ -471,7 +574,16 @@ class FastDeltaDrugResponseModel(nn.Module):
                 covariate_hidden,
             )
             control_hidden = control_hidden + pcep_hidden
+        target_expression_hidden = None
+        if self.target_expression_enabled:
+            target_expression_hidden = self._encode_target_expression_context(normalized_control, batch.get("drug_indices"))
+            if self.target_expression_fusion_mode == "control_add":
+                control_hidden = control_hidden + target_expression_hidden
+            elif self.target_expression_fusion_mode == "pair_add":
+                pair_hidden = pair_hidden + target_expression_hidden
         pieces = [control_hidden, pair_hidden, target_hidden, covariate_hidden]
+        if target_expression_hidden is not None and self.target_expression_fusion_mode == "piece":
+            pieces.append(target_expression_hidden)
         graph_hidden = None
         if self.graph_feature_dim > 0:
             if graph_features is None or graph_feature_mask is None:
@@ -688,6 +800,52 @@ class FastDeltaDrugResponseModel(nn.Module):
         gamma, beta = gamma_beta.chunk(2, dim=-1)
         scale = float(self.cell_pair_film_scale)
         return pair_hidden * (1.0 + scale * torch.tanh(gamma)) + scale * beta
+
+    def _encode_target_expression_context(
+        self,
+        normalized_expression: torch.Tensor,
+        drug_indices: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if self.target_expression_encoder is None or self.target_expression_scale is None:
+            raise RuntimeError("target expression context was not initialized")
+        if drug_indices is None:
+            batch_size = normalized_expression.shape[0]
+            return normalized_expression.new_zeros(batch_size, self.hidden_dim)
+        indices = drug_indices.to(normalized_expression.device).long()
+        protein_features = self.target_expression_protein_features.to(
+            device=normalized_expression.device,
+            dtype=normalized_expression.dtype,
+        )
+        indices = indices.clamp(min=0, max=self.target_expression_drug_count - 1)
+        if self.target_expression_indices.numel() > 0:
+            gene_indices = self.target_expression_indices[indices]
+            weights = self.target_expression_values[indices].to(
+                device=normalized_expression.device,
+                dtype=normalized_expression.dtype,
+            )
+            expanded_expression = normalized_expression.unsqueeze(1).expand(-1, 2, -1)
+            selected_expression = torch.gather(expanded_expression, dim=2, index=gene_indices)
+            selected_features = protein_features[gene_indices]
+            pooled = (selected_features * (weights * selected_expression).unsqueeze(-1)).sum(dim=2)
+        else:
+            weights = self.target_expression_weights[indices].to(
+                device=normalized_expression.device,
+                dtype=normalized_expression.dtype,
+            )
+            weighted_expression = weights * normalized_expression.unsqueeze(1)
+            pooled = torch.matmul(weighted_expression, protein_features)
+        context1 = pooled[:, 0, :]
+        context2 = pooled[:, 1, :]
+        pair_context = torch.cat(
+            [
+                0.5 * (context1 + context2),
+                torch.abs(context1 - context2),
+                context1 * context2,
+            ],
+            dim=-1,
+        )
+        encoded = self.target_expression_encoder(pair_context)
+        return self.target_expression_scale.to(encoded.dtype) * encoded
 
     def _encode_prior_features(
         self,

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -174,6 +175,173 @@ def graph_feature_blocks_from_meta(meta: dict[str, Any] | None) -> list[dict[str
         blocks.append({"name": str(name), "start": int(span[0]), "end": int(span[1])})
     blocks.sort(key=lambda item: int(item["start"]))
     return blocks
+
+
+def _file_signature(path: Path) -> dict[str, object]:
+    stat = path.stat()
+    return {
+        "path": str(path.resolve()),
+        "size": int(stat.st_size),
+        "mtime_ns": int(stat.st_mtime_ns),
+    }
+
+
+def _hash_ordered_indices(values: list[int]) -> str:
+    array = np.asarray(values, dtype=np.int64)
+    return hashlib.sha1(array.tobytes()).hexdigest()[:16]
+
+
+def build_fast_target_expression_weights(
+    *,
+    args: argparse.Namespace,
+    artifacts: FastTrainingReadyArtifacts,
+    pdi_matrix_path: Path,
+    ppi_matrix_path: Path,
+    ordered_protein_index: list[int] | None = None,
+    cache_task_name: str | None = None,
+) -> tuple[np.ndarray | None, dict[str, Any]]:
+    """Build cached drug-by-expression-gene weights from PDI and optional PPI."""
+
+    mode = str(getattr(args, "target_expression_mode", "off")).lower()
+    if mode == "off":
+        return None, {"mode": "off", "enabled": False}
+    if mode not in {"pdi", "pdi_ppi"}:
+        raise ValueError(f"unsupported target_expression_mode={mode!r}")
+    final_topk = int(getattr(args, "target_expression_topk", 256))
+    if final_topk < 0:
+        raise ValueError("target_expression_topk must be non-negative")
+    ppi_topk = int(getattr(args, "target_expression_ppi_topk", 32))
+    if ppi_topk < 0:
+        raise ValueError("target_expression_ppi_topk must be non-negative")
+    ppi_alpha = float(getattr(args, "target_expression_ppi_alpha", 0.5))
+    if ppi_alpha < 0.0:
+        raise ValueError("target_expression_ppi_alpha must be non-negative")
+    chunk_size = max(1, int(getattr(args, "target_expression_chunk_size", 64)))
+
+    pdi_matrix_path = Path(pdi_matrix_path)
+    ppi_matrix_path = Path(ppi_matrix_path)
+    ordered_values = list(artifacts.ordered_protein_index if ordered_protein_index is None else ordered_protein_index)
+    ordered = np.asarray(ordered_values, dtype=np.int64)
+    cache_payload: dict[str, Any] = {
+        "version": 1,
+        "mode": mode,
+        "dataset_group": args.dataset_group,
+        "task_name": cache_task_name or args.task_name,
+        "ordered_hash": _hash_ordered_indices(ordered_values),
+        "n_genes": int(len(ordered)),
+        "final_topk": int(final_topk),
+        "ppi_topk": int(ppi_topk),
+        "ppi_alpha": float(ppi_alpha),
+        "pdi": _file_signature(pdi_matrix_path),
+        "ppi": _file_signature(ppi_matrix_path) if mode == "pdi_ppi" else None,
+    }
+    cache_key = hashlib.sha1(json.dumps(cache_payload, sort_keys=True).encode("utf-8")).hexdigest()[:20]
+    cache_dir = Path(getattr(args, "target_expression_cache_dir", "") or args.graph_cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    weight_path = cache_dir / f"target_expression_weights_{cache_key}.npy"
+    meta_path = cache_dir / f"target_expression_weights_{cache_key}.json"
+    if weight_path.exists() and meta_path.exists() and not bool(getattr(args, "force_target_expression_cache_rebuild", False)):
+        meta = load_json(meta_path)
+        meta["cache_hit"] = True
+        return np.load(weight_path, mmap_mode="r"), meta
+
+    pdi = np.load(pdi_matrix_path, mmap_mode="r")
+    if pdi.ndim != 2:
+        raise ValueError(f"PDI matrix must be 2D; got {pdi.shape}")
+    n_drugs, n_proteins = int(pdi.shape[0]), int(pdi.shape[1])
+    valid_gene = (ordered >= 0) & (ordered < n_proteins)
+    if not valid_gene.any():
+        raise ValueError("no expression genes overlap the PDI protein axis")
+    final_topk = min(final_topk, int(len(ordered)))
+    ppi = None
+    if mode == "pdi_ppi" and ppi_topk > 0 and ppi_alpha > 0.0:
+        ppi = np.load(ppi_matrix_path, mmap_mode="r")
+        if ppi.ndim != 2 or ppi.shape[0] != n_proteins or ppi.shape[1] <= int(ordered[valid_gene].max(initial=0)):
+            raise ValueError(f"PPI matrix shape {ppi.shape} is incompatible with PDI proteins and expression axis")
+
+    weights_out = np.zeros((n_drugs, int(len(ordered))), dtype=np.float16)
+    direct_positive_rows = 0
+    output_positive_rows = 0
+    ppi_expanded_rows = 0
+    valid_ordered = ordered[valid_gene]
+    for start in range(0, n_drugs, chunk_size):
+        end = min(start + chunk_size, n_drugs)
+        pdi_block = np.asarray(pdi[start:end], dtype=np.float32)
+        pdi_block = np.nan_to_num(pdi_block, nan=0.0, posinf=0.0, neginf=0.0)
+        pdi_block = np.clip(pdi_block, a_min=0.0, a_max=None)
+        block_size = end - start
+        direct = np.zeros((block_size, len(ordered)), dtype=np.float32)
+        direct[:, valid_gene] = pdi_block[:, valid_ordered]
+        direct_positive_rows += int((direct.sum(axis=1) > 0.0).sum())
+        weights = direct
+        if ppi is not None:
+            top_count = min(ppi_topk, n_proteins)
+            if top_count > 0:
+                top_idx = np.argpartition(-pdi_block, kth=top_count - 1, axis=1)[:, :top_count]
+                top_scores = np.take_along_axis(pdi_block, top_idx, axis=1)
+                top_scores = np.where(top_scores > 0.0, top_scores, 0.0).astype(np.float32, copy=False)
+                score_sum = top_scores.sum(axis=1, keepdims=True)
+                active = score_sum.reshape(-1) > 0.0
+                if active.any():
+                    ppi_rows = np.asarray(ppi[top_idx.reshape(-1)][:, valid_ordered], dtype=np.float32)
+                    ppi_rows = ppi_rows.reshape(block_size, top_count, valid_ordered.shape[0])
+                    expanded_valid = (ppi_rows * top_scores[:, :, None]).sum(axis=1)
+                    expanded_valid = np.divide(
+                        expanded_valid,
+                        np.clip(score_sum, a_min=1e-8, a_max=None),
+                        out=np.zeros_like(expanded_valid),
+                        where=score_sum > 0.0,
+                    )
+                    expanded = np.zeros_like(weights)
+                    expanded[:, valid_gene] = expanded_valid
+                    weights = weights + ppi_alpha * expanded
+                    ppi_expanded_rows += int(active.sum())
+        weights = np.nan_to_num(weights, nan=0.0, posinf=0.0, neginf=0.0)
+        weights = np.clip(weights, a_min=0.0, a_max=None)
+        if final_topk > 0 and final_topk < weights.shape[1]:
+            top_idx = np.argpartition(-weights, kth=final_topk - 1, axis=1)[:, :final_topk]
+            top_values = np.take_along_axis(weights, top_idx, axis=1)
+            top_values = np.where(top_values > 0.0, top_values, 0.0)
+            top_sum = top_values.sum(axis=1, keepdims=True)
+            normalized = np.divide(
+                top_values,
+                np.clip(top_sum, a_min=1e-8, a_max=None),
+                out=np.zeros_like(top_values),
+                where=top_sum > 0.0,
+            )
+            rows = np.arange(start, end, dtype=np.int64).reshape(-1, 1)
+            weights_out[rows, top_idx] = normalized.astype(np.float16, copy=False)
+            output_positive_rows += int((top_sum.reshape(-1) > 0.0).sum())
+        else:
+            weight_sum = weights.sum(axis=1, keepdims=True)
+            normalized = np.divide(
+                weights,
+                np.clip(weight_sum, a_min=1e-8, a_max=None),
+                out=np.zeros_like(weights),
+                where=weight_sum > 0.0,
+            )
+            weights_out[start:end] = normalized.astype(np.float16, copy=False)
+            output_positive_rows += int((weight_sum.reshape(-1) > 0.0).sum())
+
+    tmp_path = weight_path.with_name(f".{weight_path.name}.{os.getpid()}.tmp")
+    with tmp_path.open("wb") as handle:
+        np.save(handle, weights_out, allow_pickle=False)
+    os.replace(tmp_path, weight_path)
+    meta = {
+        **cache_payload,
+        "enabled": True,
+        "cache_hit": False,
+        "weight_path": str(weight_path.resolve()),
+        "weight_shape": [int(item) for item in weights_out.shape],
+        "weight_dtype": str(weights_out.dtype),
+        "valid_expression_gene_count": int(valid_gene.sum()),
+        "direct_positive_rows": int(direct_positive_rows),
+        "ppi_expanded_rows": int(ppi_expanded_rows),
+        "output_positive_rows": int(output_positive_rows),
+        "chunk_size": int(chunk_size),
+    }
+    dump_json(meta_path, json_safe(meta))
+    return np.load(weight_path, mmap_mode="r"), meta
 
 
 def parse_limit_batches(value: str) -> int | float:
@@ -1130,6 +1298,12 @@ def run_fast_training(args: argparse.Namespace) -> None:
         train_indices=train_indices,
         pdi_matrix_path=pdi_matrix_path,
     )
+    target_expression_weight_matrix, target_expression_summary = build_fast_target_expression_weights(
+        args=args,
+        artifacts=artifacts,
+        pdi_matrix_path=pdi_matrix_path,
+        ppi_matrix_path=ppi_matrix_path,
+    )
     prior_feature_dim = int(split_summary.get("cell_prior", {}).get("feature_dim", 0))
 
     model = FastDeltaDrugResponseModel(
@@ -1158,6 +1332,12 @@ def run_fast_training(args: argparse.Namespace) -> None:
         pair_fusion_mode=args.pair_fusion_mode,
         pair_type_features=args.pair_type_features,
         cell_pair_film_scale=args.cell_pair_film_scale,
+        target_expression_mode=args.target_expression_mode,
+        target_expression_weight_matrix=target_expression_weight_matrix,
+        target_expression_dim=args.target_expression_dim,
+        target_expression_init_scale=args.target_expression_init_scale,
+        target_expression_seed=args.target_expression_seed,
+        target_expression_fusion_mode=args.target_expression_fusion_mode,
         protein_concat_mode=args.protein_concat_mode,
         protein_concat_dim=args.protein_concat_dim,
         protein_concat_topk=args.protein_concat_topk,
@@ -1243,6 +1423,15 @@ def run_fast_training(args: argparse.Namespace) -> None:
         "pair_fusion_mode": args.pair_fusion_mode,
         "pair_type_features": args.pair_type_features,
         "cell_pair_film_scale": args.cell_pair_film_scale,
+        "target_expression_mode": args.target_expression_mode,
+        "target_expression_dim": args.target_expression_dim,
+        "target_expression_topk": args.target_expression_topk,
+        "target_expression_ppi_topk": args.target_expression_ppi_topk,
+        "target_expression_ppi_alpha": args.target_expression_ppi_alpha,
+        "target_expression_init_scale": args.target_expression_init_scale,
+        "target_expression_seed": args.target_expression_seed,
+        "target_expression_fusion_mode": args.target_expression_fusion_mode,
+        "target_expression_summary": json_safe(target_expression_summary),
         "graph_feature_meta": json_safe(graph_feature_meta),
         "protein_concat_mode": args.protein_concat_mode,
         "protein_concat_dim": args.protein_concat_dim,
@@ -1600,6 +1789,26 @@ def main() -> None:
     )
     parser.add_argument("--pair-type-features", action="store_true")
     parser.add_argument("--cell-pair-film-scale", type=float, default=0.0)
+    parser.add_argument(
+        "--target-expression-mode",
+        choices=["off", "pdi", "pdi_ppi"],
+        default="off",
+        help="Add drug-specific control-expression context pooled over PDI targets and optional PPI neighbors.",
+    )
+    parser.add_argument("--target-expression-dim", type=int, default=64)
+    parser.add_argument("--target-expression-topk", type=int, default=256)
+    parser.add_argument("--target-expression-ppi-topk", type=int, default=32)
+    parser.add_argument("--target-expression-ppi-alpha", type=float, default=0.5)
+    parser.add_argument("--target-expression-init-scale", type=float, default=0.1)
+    parser.add_argument("--target-expression-seed", type=int, default=29)
+    parser.add_argument(
+        "--target-expression-fusion-mode",
+        choices=["piece", "control_add", "pair_add"],
+        default="piece",
+    )
+    parser.add_argument("--target-expression-chunk-size", type=int, default=64)
+    parser.add_argument("--target-expression-cache-dir", default="")
+    parser.add_argument("--force-target-expression-cache-rebuild", action="store_true")
     parser.add_argument("--protein-concat-mode", choices=["off", "pcep", "pcep_cell", "pcep_dual"], default="pcep")
     parser.add_argument("--protein-concat-dim", type=int, default=64)
     parser.add_argument("--protein-concat-topk", type=int, default=512)
