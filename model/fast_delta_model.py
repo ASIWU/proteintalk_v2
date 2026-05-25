@@ -44,6 +44,14 @@ def _random_projection(in_dim: int, out_dim: int, *, seed: int) -> np.ndarray:
     return rng.normal(0.0, scale, size=(in_dim, out_dim)).astype(np.float32)
 
 
+def _zero_init_last_linear(module: nn.Module) -> None:
+    for layer in reversed(list(module.modules())):
+        if isinstance(layer, nn.Linear):
+            nn.init.zeros_(layer.weight)
+            nn.init.zeros_(layer.bias)
+            return
+
+
 def sparsemax(logits: torch.Tensor, dim: int = -1) -> torch.Tensor:
     """Sparse probability projection used for hop selection gates."""
 
@@ -100,6 +108,7 @@ class FastDeltaDrugResponseModel(nn.Module):
         graph_jump_temperature: float = 1.0,
         pair_fusion_mode: str = "symmetric",
         pair_type_features: bool = False,
+        cell_pair_film_scale: float = 0.0,
         protein_concat_mode: str = "off",
         protein_concat_dim: int = 64,
         protein_concat_topk: int = 512,
@@ -109,9 +118,13 @@ class FastDeltaDrugResponseModel(nn.Module):
         protein_concat_expr_scale: float = 1.0,
         control_logit_scale: float = 0.0,
         pair_logit_scale: float = 0.0,
+        pair_logit_gate: bool = False,
         target_logit_scale: float = 0.0,
         covariate_logit_scale: float = 0.0,
         aux_covariate_sizes: list[int] | None = None,
+        prior_feature_dim: int = 0,
+        prior_logit_scale: float = 0.0,
+        prior_fixed_logit_scale: float = 0.0,
         use_ddi: bool = False,
         residual_expression: bool = True,
         init_delta_scale: float = 0.1,
@@ -138,6 +151,9 @@ class FastDeltaDrugResponseModel(nn.Module):
         if self.pair_fusion_mode not in {"symmetric", "rich_symmetric", "ordered_concat", "dual"}:
             raise ValueError("pair_fusion_mode must be symmetric, rich_symmetric, ordered_concat, or dual")
         self.pair_type_features = bool(pair_type_features)
+        self.cell_pair_film_scale = float(cell_pair_film_scale)
+        if self.cell_pair_film_scale < 0.0:
+            raise ValueError("cell_pair_film_scale must be non-negative")
         self.protein_concat_mode = str(protein_concat_mode).lower()
         if self.protein_concat_mode not in {"off", "pcep", "pcep_cell", "pcep_dual"}:
             raise ValueError("protein_concat_mode must be off, pcep, pcep_cell, or pcep_dual")
@@ -149,8 +165,16 @@ class FastDeltaDrugResponseModel(nn.Module):
         self.protein_concat_expr_scale = float(protein_concat_expr_scale)
         self.control_logit_scale = float(control_logit_scale)
         self.pair_logit_scale = float(pair_logit_scale)
+        self.pair_logit_gate_enabled = bool(pair_logit_gate)
         self.target_logit_scale = float(target_logit_scale)
         self.covariate_logit_scale = float(covariate_logit_scale)
+        self.prior_feature_dim = int(prior_feature_dim)
+        self.prior_logit_scale = float(prior_logit_scale)
+        self.prior_fixed_logit_scale = float(prior_fixed_logit_scale)
+        if self.prior_feature_dim < 0:
+            raise ValueError("prior_feature_dim must be non-negative")
+        if self.prior_fixed_logit_scale < 0.0:
+            raise ValueError("prior_fixed_logit_scale must be non-negative")
 
         protein_embedding = np.asarray(protein_embedding, dtype=np.float32)
         self.register_buffer(
@@ -235,6 +259,13 @@ class FastDeltaDrugResponseModel(nn.Module):
             dropout=dropout,
             layers=2,
         )
+        self.cell_pair_film = (
+            make_mlp(hidden_dim, hidden_dim, hidden_dim * 2, dropout=dropout, layers=2)
+            if self.cell_pair_film_scale > 0.0
+            else None
+        )
+        if self.cell_pair_film is not None:
+            _zero_init_last_linear(self.cell_pair_film)
         self.target_encoder = make_mlp(
             self.protein_embedding_dim,
             hidden_dim,
@@ -301,8 +332,15 @@ class FastDeltaDrugResponseModel(nn.Module):
             else None
         )
         self.ddi_encoder = make_mlp(1, hidden_dim, hidden_dim, dropout=dropout, layers=2) if self.use_ddi else None
+        self.prior_encoder = (
+            make_mlp(self.prior_feature_dim, hidden_dim, hidden_dim, dropout=dropout, layers=2)
+            if self.prior_feature_dim > 0
+            else None
+        )
 
-        fusion_input_dim = hidden_dim * (4 + int(self.use_ddi) + int(self.graph_feature_dim > 0))
+        fusion_input_dim = hidden_dim * (
+            4 + int(self.use_ddi) + int(self.graph_feature_dim > 0) + int(self.prior_feature_dim > 0)
+        )
         self.fusion = make_mlp(
             fusion_input_dim,
             hidden_dim,
@@ -345,6 +383,17 @@ class FastDeltaDrugResponseModel(nn.Module):
             dropout,
             self.pair_logit_scale,
         )
+        self.pair_logit_gate_head = (
+            nn.Sequential(
+                nn.LayerNorm(hidden_dim),
+                nn.Linear(hidden_dim, head_hidden),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(head_hidden, 1),
+            )
+            if self.pair_logit_scale and self.pair_logit_gate_enabled
+            else None
+        )
         self.target_response_head, self.target_synergy_head = self._make_aux_logit_heads(
             hidden_dim,
             head_hidden,
@@ -356,6 +405,12 @@ class FastDeltaDrugResponseModel(nn.Module):
             head_hidden,
             dropout,
             self.covariate_logit_scale,
+        )
+        self.prior_response_head, self.prior_synergy_head = self._make_aux_logit_heads(
+            hidden_dim,
+            head_hidden,
+            dropout,
+            self.prior_logit_scale if self.prior_feature_dim > 0 else 0.0,
         )
         self.aux_covariate_heads = nn.ModuleList(
             [
@@ -392,7 +447,10 @@ class FastDeltaDrugResponseModel(nn.Module):
             else None
         )
 
-    def forward(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(
+        self,
+        batch: dict[str, torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor], torch.Tensor]:
         control_expression = torch.nan_to_num(batch["control_expression"].float(), nan=0.0, posinf=0.0, neginf=0.0)
         normalized_control = self.control_norm(control_expression)
         control_hidden = self.control_encoder(normalized_control)
@@ -402,6 +460,8 @@ class FastDeltaDrugResponseModel(nn.Module):
         pair_hidden = self._encode_drug_pair(batch["drug_embeddings"].float(), graph_features, batch.get("drug_indices"))
         target_hidden = self._encode_targets(batch["target_indices"].long(), batch["target_mask"].float())
         covariate_hidden = self._encode_covariates(batch["covariates"].long(), device=control_expression.device)
+        if self.cell_pair_film is not None and self.cell_pair_film_scale > 0.0:
+            pair_hidden = self._apply_cell_pair_film(pair_hidden, control_hidden)
         if self.protein_concat_mode != "off":
             pcep_hidden = self._encode_protein_concat(
                 normalized_control,
@@ -435,6 +495,14 @@ class FastDeltaDrugResponseModel(nn.Module):
                 raise RuntimeError("DDI encoder was not initialized")
             ddi = batch["ddi_value"].float().reshape(-1, 1)
             pieces.append(self.ddi_encoder(ddi))
+        prior_hidden = None
+        if self.prior_feature_dim > 0:
+            prior_hidden = self._encode_prior_features(
+                batch.get("prior_features"),
+                control_expression.device,
+                batch_size=control_expression.shape[0],
+            )
+            pieces.append(prior_hidden)
         hidden = self.fusion(torch.cat(pieces, dim=-1))
         delta = self.delta_head(hidden)
         if self.residual_expression:
@@ -451,13 +519,11 @@ class FastDeltaDrugResponseModel(nn.Module):
             self.control_response_head,
             self.control_synergy_head,
         )
-        response_logits, synergy_logits = self._add_aux_logits(
+        response_logits, synergy_logits = self._add_pair_logits(
             response_logits,
             synergy_logits,
             pair_hidden,
-            self.pair_logit_scale,
-            self.pair_response_head,
-            self.pair_synergy_head,
+            control_hidden,
         )
         response_logits, synergy_logits = self._add_aux_logits(
             response_logits,
@@ -480,8 +546,21 @@ class FastDeltaDrugResponseModel(nn.Module):
                 raise RuntimeError("graph logit heads were not initialized")
             response_logits = response_logits + self.graph_logit_scale * self.graph_response_head(graph_hidden)
             synergy_logits = synergy_logits + self.graph_logit_scale * self.graph_synergy_head(graph_hidden)
+        if prior_hidden is not None and self.prior_logit_scale:
+            response_logits, synergy_logits = self._add_aux_logits(
+                response_logits,
+                synergy_logits,
+                prior_hidden,
+                self.prior_logit_scale,
+                self.prior_response_head,
+                self.prior_synergy_head,
+            )
+        if self.prior_fixed_logit_scale and self.prior_feature_dim > 0 and not self.training:
+            fixed_prior_logit = self._fixed_prior_logit(batch.get("prior_features"), control_expression.device)
+            response_logits = response_logits + self.prior_fixed_logit_scale * fixed_prior_logit
+            synergy_logits = synergy_logits + self.prior_fixed_logit_scale * fixed_prior_logit
         aux_outputs = [head(expression_hidden) for head in self.aux_covariate_heads]
-        return expression_pred, response_logits, synergy_logits, aux_outputs
+        return expression_pred, response_logits, synergy_logits, aux_outputs, expression_hidden
 
     def _make_aux_logit_heads(
         self,
@@ -520,6 +599,26 @@ class FastDeltaDrugResponseModel(nn.Module):
         return (
             response_logits + float(scale) * response_head(hidden),
             synergy_logits + float(scale) * synergy_head(hidden),
+        )
+
+    def _add_pair_logits(
+        self,
+        response_logits: torch.Tensor,
+        synergy_logits: torch.Tensor,
+        pair_hidden: torch.Tensor,
+        control_hidden: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if not self.pair_logit_scale:
+            return response_logits, synergy_logits
+        if self.pair_response_head is None or self.pair_synergy_head is None:
+            raise RuntimeError("pair auxiliary logit heads were not initialized")
+        gate = 1.0
+        if self.pair_logit_gate_head is not None:
+            gate = torch.sigmoid(self.pair_logit_gate_head(control_hidden))
+        scale = float(self.pair_logit_scale)
+        return (
+            response_logits + scale * gate * self.pair_response_head(pair_hidden),
+            synergy_logits + scale * gate * self.pair_synergy_head(pair_hidden),
         )
 
     def _pair_encoder_input_dim(self, hidden_dim: int) -> int:
@@ -581,6 +680,42 @@ class FastDeltaDrugResponseModel(nn.Module):
             same_slot = (indices[:, 0] == indices[:, 1]).to(reference.dtype).reshape(-1, 1)
             type_features = torch.cat([same_slot, 1.0 - same_slot], dim=-1)
         return self.pair_type_encoder(type_features)
+
+    def _apply_cell_pair_film(self, pair_hidden: torch.Tensor, control_hidden: torch.Tensor) -> torch.Tensor:
+        if self.cell_pair_film is None:
+            return pair_hidden
+        gamma_beta = self.cell_pair_film(control_hidden)
+        gamma, beta = gamma_beta.chunk(2, dim=-1)
+        scale = float(self.cell_pair_film_scale)
+        return pair_hidden * (1.0 + scale * torch.tanh(gamma)) + scale * beta
+
+    def _encode_prior_features(
+        self,
+        prior_features: torch.Tensor | None,
+        device: torch.device,
+        *,
+        batch_size: int,
+    ) -> torch.Tensor:
+        if self.prior_encoder is None:
+            raise RuntimeError("prior_encoder is not initialized")
+        if prior_features is None:
+            prior_features = torch.zeros(batch_size, self.prior_feature_dim, device=device)
+        prior_features = prior_features.to(device=device, dtype=torch.float32)
+        if prior_features.shape[-1] != self.prior_feature_dim:
+            raise ValueError(
+                f"prior_features last dimension {prior_features.shape[-1]} != expected {self.prior_feature_dim}"
+            )
+        prior_features = torch.nan_to_num(prior_features, nan=0.0, posinf=0.0, neginf=0.0)
+        return self.prior_encoder(prior_features)
+
+    def _fixed_prior_logit(self, prior_features: torch.Tensor | None, device: torch.device) -> torch.Tensor:
+        if prior_features is None:
+            return torch.zeros(0, 1, device=device)
+        prior_features = prior_features.to(device=device, dtype=torch.float32)
+        if prior_features.shape[-1] < 1:
+            raise ValueError("fixed prior logit requires prior_features with at least one column")
+        prior_prob = torch.nan_to_num(prior_features[:, 0], nan=0.5, posinf=0.5, neginf=0.5).clamp(1e-4, 1.0 - 1e-4)
+        return torch.logit(prior_prob).reshape(-1, 1)
 
     def _encode_graph_pair(self, graph_features: torch.Tensor, graph_feature_mask: torch.Tensor) -> torch.Tensor:
         if self.graph_encoder is None:

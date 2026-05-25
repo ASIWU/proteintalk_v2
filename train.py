@@ -7,6 +7,8 @@ import argparse
 import json
 import math
 import os
+import warnings
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -542,6 +544,15 @@ def build_fast_data_loaders(
     test_set_info = load_fast_set_info(split_dir, "test", args.split_strategy)
     covariate_unknown_indices = fast_covariate_unknown_indices(args, artifacts)
     covariate_known_values = fast_covariate_known_values(args, artifacts, train_indices) if covariate_unknown_indices else {}
+    prior_feature_matrix, prior_summary = build_fast_cell_prior_features(
+        args=args,
+        artifacts=artifacts,
+        train_indices=train_indices,
+        row_to_set=row_to_set,
+        train_set_info=train_set_info,
+        valid_set_info=valid_set_info,
+        test_set_info=test_set_info,
+    )
     dataset_kwargs = {
         "artifacts": artifacts,
         "drug_embedding_matrix": drug_embedding,
@@ -555,6 +566,7 @@ def build_fast_data_loaders(
         "covariate_known_values": covariate_known_values,
         "covariate_unknown_indices": covariate_unknown_indices,
         "covariate_unk_dropout": args.covariate_unk_dropout,
+        "prior_feature_matrix": prior_feature_matrix,
     }
     train_dataset = FastProteinTalkDataset(
         indices=train_indices,
@@ -620,6 +632,7 @@ def build_fast_data_loaders(
         "covariate_unk_for_unseen": args.covariate_unk_for_unseen,
         "covariate_unk_fields": list(covariate_unknown_indices),
         "covariate_unk_dropout": args.covariate_unk_dropout,
+        "cell_prior": prior_summary,
     }
     return train_loader, valid_loader, test_loader, split_summary, train_indices
 
@@ -674,6 +687,32 @@ def fast_aux_covariate_indices(args: argparse.Namespace) -> list[int]:
     return [field_to_index[field] for field in fields]
 
 
+def fast_covariate_indices_for_fields(args: argparse.Namespace, fields: list[str]) -> list[int]:
+    field_to_index = {field: index for index, field in enumerate(args.batch_cov_list)}
+    missing = [field for field in fields if field not in field_to_index]
+    if missing:
+        raise ValueError(f"covariate fields must be present in --batch-cov-list; missing={missing!r}")
+    return [field_to_index[field] for field in fields]
+
+
+def fast_aux_covariate_contrastive_indices(args: argparse.Namespace) -> list[int]:
+    if float(getattr(args, "aux_covariate_contrastive_weight", 0.0)) <= 0.0:
+        return []
+    fields = list(getattr(args, "aux_covariate_contrastive_fields", None) or [])
+    if not fields:
+        return []
+    return fast_covariate_indices_for_fields(args, fields)
+
+
+def fast_ranking_loss_group_index(args: argparse.Namespace) -> int | None:
+    if float(getattr(args, "ranking_loss_weight", 0.0)) <= 0.0:
+        return None
+    field = str(getattr(args, "ranking_loss_group_field", "") or "").strip()
+    if not field or field.lower() in {"none", "batch"}:
+        return None
+    return fast_covariate_indices_for_fields(args, [field])[0]
+
+
 def fast_aux_covariate_sizes(
     args: argparse.Namespace,
     artifacts: FastTrainingReadyArtifacts,
@@ -706,6 +745,254 @@ def fast_covariate_known_values(
         )
         known[field] = {int(value) for value in parsed}
     return known
+
+
+def _standardized_expression_rows(artifacts: FastTrainingReadyArtifacts, rows: np.ndarray) -> np.ndarray:
+    values = np.asarray(artifacts.expression_matrix[rows], dtype=np.float32)
+    finite = np.isfinite(values)
+    safe = np.where(finite, values, 0.0)
+    clipped = np.clip(safe, a_min=0.0, a_max=None)
+    logged = np.log1p(clipped)
+    valid_count = finite.sum(axis=1, keepdims=True).clip(min=1)
+    mean = (logged * finite).sum(axis=1, keepdims=True) / valid_count
+    centered = np.where(finite, logged - mean, 0.0)
+    variance = (centered * centered * finite).sum(axis=1, keepdims=True) / valid_count
+    std = np.sqrt(np.clip(variance, a_min=1e-6, a_max=None))
+    normalized = centered / std
+    norm = np.linalg.norm(normalized, axis=1, keepdims=True)
+    return (normalized / np.clip(norm, a_min=1e-6, a_max=None)).astype(np.float32, copy=False)
+
+
+def _control_row_lookup(
+    *,
+    row_to_set: dict[int, int],
+    set_infos: list[dict[int, dict[str, list[int]]]],
+    row_count: int,
+) -> np.ndarray:
+    merged: dict[int, dict[str, list[int]]] = {}
+    for set_info in set_infos:
+        merged.update(set_info)
+    control_rows = np.arange(row_count, dtype=np.int64)
+    for row_idx, set_idx in row_to_set.items():
+        info = merged.get(int(set_idx))
+        if info and info.get("control"):
+            control_rows[int(row_idx)] = int(sorted(info["control"])[0])
+    return control_rows
+
+
+def _softmax_numpy(values: np.ndarray, temperature: float) -> np.ndarray:
+    scaled = values / max(float(temperature), 1e-6)
+    scaled = scaled - np.max(scaled)
+    weights = np.exp(scaled)
+    return weights / np.clip(weights.sum(), a_min=1e-8, a_max=None)
+
+
+def build_fast_cell_prior_features(
+    *,
+    args: argparse.Namespace,
+    artifacts: FastTrainingReadyArtifacts,
+    train_indices: list[int],
+    row_to_set: dict[int, int],
+    train_set_info: dict[int, dict[str, list[int]]],
+    valid_set_info: dict[int, dict[str, list[int]]],
+    test_set_info: dict[int, dict[str, list[int]]],
+) -> tuple[np.ndarray | None, dict[str, Any]]:
+    mode = str(getattr(args, "cell_prior_mode", "off")).lower()
+    if mode == "off":
+        return None, {"mode": "off", "feature_dim": 0}
+    if mode != "knn_drug":
+        raise ValueError(f"unsupported cell_prior_mode: {mode!r}")
+    required_columns = {"Cell_index", "pert_index1", args.task_label_key}
+    missing_columns = sorted(required_columns - set(artifacts.df.columns))
+    if missing_columns:
+        raise ValueError(f"cell prior requires missing feature_table columns: {missing_columns}")
+
+    encoder = encode_synergy_label if args.task_head == "synergy" else encode_response_label
+    control_rows = _control_row_lookup(
+        row_to_set=row_to_set,
+        set_infos=[train_set_info, valid_set_info, test_set_info],
+        row_count=len(artifacts.df),
+    )
+    train_cells = pd_to_int_array(artifacts.df.iloc[train_indices]["Cell_index"])
+    train_control_rows = control_rows[np.asarray(train_indices, dtype=np.int64)]
+
+    cell_to_controls: dict[int, set[int]] = defaultdict(set)
+    for cell_index, control_row in zip(train_cells, train_control_rows, strict=True):
+        cell_to_controls[int(cell_index)].add(int(control_row))
+    if len(cell_to_controls) < 2:
+        return np.zeros((len(artifacts.df), 5), dtype=np.float32), {
+            "mode": mode,
+            "feature_dim": 5,
+            "enabled": False,
+            "reason": "fewer than two train cells",
+        }
+
+    cell_ids = np.asarray(sorted(cell_to_controls), dtype=np.int64)
+    prototypes = []
+    for cell_index in cell_ids:
+        rows = np.asarray(sorted(cell_to_controls[int(cell_index)]), dtype=np.int64)
+        expr = _standardized_expression_rows(artifacts, rows)
+        proto = expr.mean(axis=0)
+        proto = proto / np.clip(np.linalg.norm(proto), a_min=1e-6, a_max=None)
+        prototypes.append(proto.astype(np.float32, copy=False))
+    prototype_matrix = np.stack(prototypes, axis=0)
+
+    global_sum: dict[int, float] = defaultdict(float)
+    global_count: dict[int, int] = defaultdict(int)
+    cell_drug_sum: dict[int, dict[int, float]] = defaultdict(lambda: defaultdict(float))
+    cell_drug_count: dict[int, dict[int, int]] = defaultdict(lambda: defaultdict(int))
+    total_positive = 0.0
+    total_count = 0
+    for row_idx in train_indices:
+        label, mask = encoder(artifacts.df.at[int(row_idx), args.task_label_key])
+        if mask >= 0.5:
+            continue
+        drug_index = int(artifacts.df.at[int(row_idx), "pert_index1"])
+        cell_index = int(artifacts.df.at[int(row_idx), "Cell_index"])
+        global_sum[drug_index] += float(label)
+        global_count[drug_index] += 1
+        cell_drug_sum[cell_index][drug_index] += float(label)
+        cell_drug_count[cell_index][drug_index] += 1
+        total_positive += float(label)
+        total_count += 1
+    if total_count == 0:
+        return np.zeros((len(artifacts.df), 5), dtype=np.float32), {
+            "mode": mode,
+            "feature_dim": 5,
+            "enabled": False,
+            "reason": "no active train labels",
+        }
+    overall_prior = float(total_positive / total_count)
+    max_drug_count = max(global_count.values()) if global_count else 1
+    k = max(1, int(args.cell_prior_k))
+    temperature = max(float(args.cell_prior_temperature), 1e-6)
+    features = np.zeros((len(artifacts.df), 5), dtype=np.float32)
+    all_rows = np.arange(len(artifacts.df), dtype=np.int64)
+    chunk_size = max(1, int(args.cell_prior_chunk_size))
+    for start in range(0, len(all_rows), chunk_size):
+        rows = all_rows[start : start + chunk_size]
+        query = _standardized_expression_rows(artifacts, control_rows[rows])
+        similarities = query @ prototype_matrix.T
+        row_cells = pd_to_int_array(artifacts.df.iloc[rows]["Cell_index"])
+        row_drugs = pd_to_int_array(artifacts.df.iloc[rows]["pert_index1"])
+        for offset, row_idx in enumerate(rows):
+            sims = similarities[offset].copy()
+            same_cell = cell_ids == int(row_cells[offset])
+            if same_cell.any() and (~same_cell).any():
+                sims[same_cell] = -np.inf
+            finite = np.isfinite(sims)
+            if not finite.any():
+                sims = similarities[offset]
+                finite = np.isfinite(sims)
+            candidate_order = np.argsort(-sims[finite])
+            finite_cell_ids = cell_ids[finite]
+            finite_sims = sims[finite]
+            top_local = candidate_order[: min(k, candidate_order.shape[0])]
+            top_cells = finite_cell_ids[top_local]
+            top_sims = finite_sims[top_local]
+            sim_weights = _softmax_numpy(top_sims, temperature=temperature)
+            drug_index = int(row_drugs[offset])
+            weighted_sum = 0.0
+            weighted_count = 0.0
+            raw_count = 0
+            for weight, cell_index in zip(sim_weights, top_cells, strict=True):
+                count = cell_drug_count[int(cell_index)].get(drug_index, 0)
+                if count <= 0:
+                    continue
+                mean_value = cell_drug_sum[int(cell_index)][drug_index] / count
+                weighted_sum += float(weight) * float(mean_value) * float(count)
+                weighted_count += float(weight) * float(count)
+                raw_count += int(count)
+            global_prior = global_sum.get(drug_index, total_positive) / max(1, global_count.get(drug_index, total_count))
+            if weighted_count > 0.0:
+                neighbor_prior = weighted_sum / weighted_count
+            else:
+                neighbor_prior = global_prior
+            count_confidence = math.log1p(raw_count) / math.log1p(max_drug_count)
+            mean_similarity = float(np.mean(top_sims)) if top_sims.size else 0.0
+            features[int(row_idx)] = np.asarray(
+                [
+                    neighbor_prior,
+                    global_prior,
+                    count_confidence,
+                    0.5 * (mean_similarity + 1.0),
+                    neighbor_prior - global_prior,
+                ],
+                dtype=np.float32,
+            )
+    return features, {
+        "mode": mode,
+        "feature_dim": int(features.shape[1]),
+        "enabled": True,
+        "k": k,
+        "temperature": temperature,
+        "train_cell_count": int(len(cell_ids)),
+        "active_train_label_count": int(total_count),
+        "overall_prior": overall_prior,
+    }
+
+
+def pd_to_int_array(series: Any) -> np.ndarray:
+    import pandas as pd
+
+    return pd.to_numeric(series, errors="coerce").fillna(0).astype(np.int64).to_numpy()
+
+
+def build_fast_mse_gene_weights(
+    *,
+    args: argparse.Namespace,
+    artifacts: FastTrainingReadyArtifacts,
+    train_indices: list[int],
+    pdi_matrix_path: Path,
+) -> tuple[torch.Tensor | None, dict[str, Any]]:
+    mode = str(getattr(args, "mse_gene_weight_mode", "off")).lower()
+    if mode == "off":
+        return None, {"mode": "off", "enabled": False}
+    if mode not in {"variance", "pdi", "variance_pdi"}:
+        raise ValueError(f"unsupported mse_gene_weight_mode: {mode!r}")
+    topk = int(args.mse_gene_weight_topk)
+    if topk <= 0:
+        raise ValueError("mse_gene_weight_topk must be positive when mse_gene_weight_mode is enabled")
+    n_genes = int(artifacts.expression_matrix.shape[1])
+    topk = min(topk, n_genes)
+    selected = np.zeros(n_genes, dtype=bool)
+    selected_counts: dict[str, int] = {}
+    if mode in {"variance", "variance_pdi"}:
+        train_matrix = np.asarray(artifacts.expression_matrix[np.asarray(train_indices, dtype=np.int64)], dtype=np.float32)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            variance = np.nanvar(train_matrix, axis=0)
+        variance = np.nan_to_num(variance, nan=-np.inf, posinf=-np.inf, neginf=-np.inf)
+        top_indices = np.argpartition(-variance, kth=topk - 1)[:topk]
+        selected[top_indices] = True
+        selected_counts["variance"] = int(top_indices.shape[0])
+    if mode in {"pdi", "variance_pdi"}:
+        pdi_matrix = np.load(pdi_matrix_path, mmap_mode="r")
+        if "pert_index1" not in artifacts.df.columns:
+            raise ValueError("PDI gene weighting requires pert_index1 in feature_table")
+        train_drugs = np.unique(pd_to_int_array(artifacts.df.iloc[train_indices]["pert_index1"]))
+        train_drugs = train_drugs[(train_drugs >= 0) & (train_drugs < pdi_matrix.shape[0])]
+        if train_drugs.size:
+            pdi_scores = np.asarray(pdi_matrix[train_drugs], dtype=np.float32).sum(axis=0)
+            ordered = np.asarray(artifacts.ordered_protein_index, dtype=np.int64)
+            expression_scores = np.zeros(n_genes, dtype=np.float32)
+            valid = (ordered >= 0) & (ordered < pdi_scores.shape[0])
+            expression_scores[valid] = pdi_scores[ordered[valid]]
+            top_indices = np.argpartition(-expression_scores, kth=topk - 1)[:topk]
+            selected[top_indices] = True
+            selected_counts["pdi"] = int(top_indices.shape[0])
+        else:
+            selected_counts["pdi"] = 0
+    weights = np.ones(n_genes, dtype=np.float32)
+    weights[selected] = float(args.mse_gene_weight_scale)
+    return torch.tensor(weights, dtype=torch.float32), {
+        "mode": mode,
+        "enabled": True,
+        "topk": topk,
+        "scale": float(args.mse_gene_weight_scale),
+        "selected_count": int(selected.sum()),
+        "selected_counts": selected_counts,
+    }
 
 
 def resolve_fast_positive_weight(
@@ -835,6 +1122,15 @@ def run_fast_training(args: argparse.Namespace) -> None:
     covariate_model_sizes = fast_covariate_model_sizes(args, artifacts)
     aux_covariate_indices = fast_aux_covariate_indices(args)
     aux_covariate_sizes = fast_aux_covariate_sizes(args, artifacts, covariate_model_sizes)
+    aux_covariate_contrastive_indices = fast_aux_covariate_contrastive_indices(args)
+    ranking_loss_group_index = fast_ranking_loss_group_index(args)
+    mse_gene_weights, mse_gene_weight_summary = build_fast_mse_gene_weights(
+        args=args,
+        artifacts=artifacts,
+        train_indices=train_indices,
+        pdi_matrix_path=pdi_matrix_path,
+    )
+    prior_feature_dim = int(split_summary.get("cell_prior", {}).get("feature_dim", 0))
 
     model = FastDeltaDrugResponseModel(
         n_genes=int(artifacts.expression_matrix.shape[1]),
@@ -861,6 +1157,7 @@ def run_fast_training(args: argparse.Namespace) -> None:
         graph_jump_temperature=args.graph_jump_temperature,
         pair_fusion_mode=args.pair_fusion_mode,
         pair_type_features=args.pair_type_features,
+        cell_pair_film_scale=args.cell_pair_film_scale,
         protein_concat_mode=args.protein_concat_mode,
         protein_concat_dim=args.protein_concat_dim,
         protein_concat_topk=args.protein_concat_topk,
@@ -870,9 +1167,13 @@ def run_fast_training(args: argparse.Namespace) -> None:
         protein_concat_expr_scale=args.protein_concat_expr_scale,
         control_logit_scale=args.control_logit_scale,
         pair_logit_scale=args.pair_logit_scale,
+        pair_logit_gate=args.pair_logit_gate,
         target_logit_scale=args.target_logit_scale,
         covariate_logit_scale=args.covariate_logit_scale,
         aux_covariate_sizes=aux_covariate_sizes,
+        prior_feature_dim=prior_feature_dim,
+        prior_logit_scale=args.cell_prior_logit_scale,
+        prior_fixed_logit_scale=args.cell_prior_fixed_logit_scale,
         use_ddi=args.use_ddi,
         residual_expression=args.residual_expression,
         init_delta_scale=args.init_delta_scale,
@@ -893,10 +1194,17 @@ def run_fast_training(args: argparse.Namespace) -> None:
         scheduler_name=args.scheduler_name,
         max_epochs=args.max_epochs,
         mse_gene_subsample=args.mse_gene_subsample,
+        mse_gene_weights=mse_gene_weights,
         label_smoothing=args.label_smoothing,
         aux_covariate_loss_weight=args.aux_covariate_loss_weight,
         aux_covariate_indices=aux_covariate_indices,
         aux_covariate_label_smoothing=args.aux_covariate_loss_label_smoothing,
+        aux_covariate_contrastive_weight=args.aux_covariate_contrastive_weight,
+        aux_covariate_contrastive_indices=aux_covariate_contrastive_indices,
+        aux_covariate_contrastive_temperature=args.aux_covariate_contrastive_temperature,
+        ranking_loss_weight=args.ranking_loss_weight,
+        ranking_loss_margin=args.ranking_loss_margin,
+        ranking_loss_group_index=ranking_loss_group_index,
     )
     load_model_state(lightning_model, args.checkpoint_path, strict=not args.allow_partial_checkpoint_load)
 
@@ -934,6 +1242,7 @@ def run_fast_training(args: argparse.Namespace) -> None:
         "graph_jump_temperature": args.graph_jump_temperature,
         "pair_fusion_mode": args.pair_fusion_mode,
         "pair_type_features": args.pair_type_features,
+        "cell_pair_film_scale": args.cell_pair_film_scale,
         "graph_feature_meta": json_safe(graph_feature_meta),
         "protein_concat_mode": args.protein_concat_mode,
         "protein_concat_dim": args.protein_concat_dim,
@@ -944,12 +1253,28 @@ def run_fast_training(args: argparse.Namespace) -> None:
         "protein_concat_expr_scale": args.protein_concat_expr_scale,
         "control_logit_scale": args.control_logit_scale,
         "pair_logit_scale": args.pair_logit_scale,
+        "pair_logit_gate": args.pair_logit_gate,
         "target_logit_scale": args.target_logit_scale,
         "covariate_logit_scale": args.covariate_logit_scale,
         "aux_covariate_loss_fields": list(args.aux_covariate_loss_fields),
         "aux_covariate_loss_indices": list(aux_covariate_indices),
         "aux_covariate_loss_weight": args.aux_covariate_loss_weight,
         "aux_covariate_loss_label_smoothing": args.aux_covariate_loss_label_smoothing,
+        "aux_covariate_contrastive_fields": list(args.aux_covariate_contrastive_fields),
+        "aux_covariate_contrastive_indices": list(aux_covariate_contrastive_indices),
+        "aux_covariate_contrastive_weight": args.aux_covariate_contrastive_weight,
+        "aux_covariate_contrastive_temperature": args.aux_covariate_contrastive_temperature,
+        "ranking_loss_weight": args.ranking_loss_weight,
+        "ranking_loss_margin": args.ranking_loss_margin,
+        "ranking_loss_group_field": args.ranking_loss_group_field,
+        "ranking_loss_group_index": ranking_loss_group_index,
+        "cell_prior_mode": args.cell_prior_mode,
+        "cell_prior_feature_dim": prior_feature_dim,
+        "cell_prior_k": args.cell_prior_k,
+        "cell_prior_temperature": args.cell_prior_temperature,
+        "cell_prior_logit_scale": args.cell_prior_logit_scale,
+        "cell_prior_fixed_logit_scale": args.cell_prior_fixed_logit_scale,
+        "mse_gene_weight_summary": mse_gene_weight_summary,
         "effective_key1": args.effective_key1,
         "effective_key2": args.effective_key2,
         "task_head": task_loss_config["task_head"],
@@ -1087,6 +1412,7 @@ def run_fast_training(args: argparse.Namespace) -> None:
         limit_train_batches=args.limit_train_batches,
         limit_val_batches=args.limit_val_batches,
         limit_test_batches=args.limit_test_batches,
+        enable_progress_bar=os.environ.get("PTV_PROGRESS_BAR", "1") != "0",
     )
     trainer.fit(lightning_model, train_loader, valid_loader)
     manifest["run_status"] = "fit_completed"
@@ -1150,6 +1476,14 @@ def main() -> None:
         help="MSE sample weight for rows whose active classification label is masked; 1.0 preserves baseline behavior.",
     )
     parser.add_argument("--mse-gene-subsample", type=int, default=0)
+    parser.add_argument(
+        "--mse-gene-weight-mode",
+        choices=["off", "variance", "pdi", "variance_pdi"],
+        default="off",
+        help="Fold-train-only gene weighting for the MSE reconstruction loss.",
+    )
+    parser.add_argument("--mse-gene-weight-topk", type=int, default=4096)
+    parser.add_argument("--mse-gene-weight-scale", type=float, default=2.0)
     parser.add_argument(
         "--active-label-sampling-weight",
         type=float,
@@ -1265,6 +1599,7 @@ def main() -> None:
         default="symmetric",
     )
     parser.add_argument("--pair-type-features", action="store_true")
+    parser.add_argument("--cell-pair-film-scale", type=float, default=0.0)
     parser.add_argument("--protein-concat-mode", choices=["off", "pcep", "pcep_cell", "pcep_dual"], default="pcep")
     parser.add_argument("--protein-concat-dim", type=int, default=64)
     parser.add_argument("--protein-concat-topk", type=int, default=512)
@@ -1279,6 +1614,7 @@ def main() -> None:
     parser.add_argument("--protein-concat-expr-scale", type=float, default=1.0)
     parser.add_argument("--control-logit-scale", type=float, default=0.0)
     parser.add_argument("--pair-logit-scale", type=float, default=0.0)
+    parser.add_argument("--pair-logit-gate", action="store_true")
     parser.add_argument("--target-logit-scale", type=float, default=0.0)
     parser.add_argument("--covariate-logit-scale", type=float, default=0.0)
     parser.add_argument(
@@ -1289,6 +1625,23 @@ def main() -> None:
     )
     parser.add_argument("--aux-covariate-loss-weight", type=float, default=0.0)
     parser.add_argument("--aux-covariate-loss-label-smoothing", type=float, default=0.0)
+    parser.add_argument(
+        "--aux-covariate-contrastive-fields",
+        nargs="*",
+        default=[],
+        help="Raw covariate fields used as labels for supervised contrastive expression-hidden loss.",
+    )
+    parser.add_argument("--aux-covariate-contrastive-weight", type=float, default=0.0)
+    parser.add_argument("--aux-covariate-contrastive-temperature", type=float, default=0.2)
+    parser.add_argument("--ranking-loss-weight", type=float, default=0.0)
+    parser.add_argument("--ranking-loss-margin", type=float, default=0.0)
+    parser.add_argument("--ranking-loss-group-field", default="Cell")
+    parser.add_argument("--cell-prior-mode", choices=["off", "knn_drug"], default="off")
+    parser.add_argument("--cell-prior-k", type=int, default=8)
+    parser.add_argument("--cell-prior-temperature", type=float, default=0.2)
+    parser.add_argument("--cell-prior-chunk-size", type=int, default=512)
+    parser.add_argument("--cell-prior-logit-scale", type=float, default=0.0)
+    parser.add_argument("--cell-prior-fixed-logit-scale", type=float, default=0.0)
     parser.add_argument("--use-ddi", action="store_true")
     parser.add_argument("--absolute-expression-head", action="store_false", dest="residual_expression")
     parser.add_argument("--init-delta-scale", type=float, default=0.1)
@@ -1613,6 +1966,7 @@ def main() -> None:
         limit_train_batches=args.limit_train_batches,
         limit_val_batches=args.limit_val_batches,
         limit_test_batches=args.limit_test_batches,
+        enable_progress_bar=os.environ.get("PTV_PROGRESS_BAR", "1") != "0",
     )
     trainer.fit(lightning_model, train_loader, valid_loader)
     manifest["run_status"] = "fit_completed"

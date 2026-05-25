@@ -269,6 +269,7 @@ class FastProteinTalkDataset(Dataset):
         covariate_known_values: dict[str, set[int]] | None = None,
         covariate_unknown_indices: dict[str, int] | None = None,
         covariate_unk_dropout: float = 0.0,
+        prior_feature_matrix: np.ndarray | None = None,
     ) -> None:
         self.artifacts = artifacts
         self.df = artifacts.df
@@ -293,6 +294,15 @@ class FastProteinTalkDataset(Dataset):
         self.covariate_known_values = covariate_known_values or {}
         self.covariate_unknown_indices = covariate_unknown_indices or {}
         self.covariate_unk_dropout = float(covariate_unk_dropout)
+        self.prior_feature_matrix = (
+            None if prior_feature_matrix is None else np.asarray(prior_feature_matrix, dtype=np.float32)
+        )
+        self.prior_feature_dim = 0 if self.prior_feature_matrix is None else int(self.prior_feature_matrix.shape[1])
+        if self.prior_feature_matrix is not None and self.prior_feature_matrix.shape[0] != len(self.df):
+            raise ValueError(
+                "prior_feature_matrix row count must match feature table; "
+                f"got {self.prior_feature_matrix.shape[0]} and {len(self.df)}"
+            )
         if self.covariate_unk_dropout < 0.0 or self.covariate_unk_dropout >= 1.0:
             raise ValueError("covariate_unk_dropout must be in [0, 1)")
         self.dataset_len = len(self.indices)
@@ -301,7 +311,8 @@ class FastProteinTalkDataset(Dataset):
 
         self.no_pert_index = int(artifacts.meta["special_values"]["pert_index"]["no"])
         self.target_pad_index = len(artifacts.meta["protein_index"])
-        self._covariates = self._build_covariate_matrix()
+        self._raw_covariates = self._build_covariate_matrix(apply_unknown_mapping=False)
+        self._covariates = self._build_covariate_matrix(apply_unknown_mapping=True)
         self._pert_indices = self._build_perturbation_indices()
         self._target_indices, self._target_mask = self._build_target_matrix()
         self._label1, self._mask1, self._label2, self._mask2 = self._build_labels()
@@ -338,6 +349,8 @@ class FastProteinTalkDataset(Dataset):
             "target_indices": self._target_indices[perturb_row],
             "target_mask": self._target_mask[perturb_row],
             "covariates": self._covariates_for(perturb_row),
+            "raw_covariates": self._raw_covariates[perturb_row],
+            "prior_features": self._prior_features_for(perturb_row),
             "ddi_value": np.asarray(self._ddi_values[perturb_row], dtype=np.float32),
             "label1": np.asarray(self._label1[perturb_row], dtype=np.float32),
             "mask1": np.asarray(self._mask1[perturb_row], dtype=np.float32),
@@ -364,14 +377,14 @@ class FastProteinTalkDataset(Dataset):
         clipped = np.clip(pert_indices, 0, self.graph_feature_matrix.shape[0] - 1)
         return np.asarray(self.graph_feature_matrix[clipped], dtype=np.float32)
 
-    def _build_covariate_matrix(self) -> np.ndarray:
+    def _build_covariate_matrix(self, *, apply_unknown_mapping: bool) -> np.ndarray:
         values = []
         for field in self.batch_cov_list:
             source_col = BATCH_COVARIATE_COLUMNS.get(field, f"{field}_index")
             if source_col not in self.df.columns:
                 raise KeyError(f"batch covariate {field!r} requires missing column {source_col!r}")
             col = pd.to_numeric(self.df[source_col], errors="coerce").fillna(0).astype(np.int64).to_numpy()
-            if field in self.covariate_known_values and field in self.covariate_unknown_indices:
+            if apply_unknown_mapping and field in self.covariate_known_values and field in self.covariate_unknown_indices:
                 known = np.fromiter(self.covariate_known_values[field], dtype=np.int64)
                 unseen = ~np.isin(col, known)
                 if unseen.any():
@@ -392,6 +405,11 @@ class FastProteinTalkDataset(Dataset):
             if unknown_index is not None and np.random.random() < self.covariate_unk_dropout:
                 covariates[col_idx] = int(unknown_index)
         return covariates
+
+    def _prior_features_for(self, row_idx: int) -> np.ndarray:
+        if self.prior_feature_matrix is None:
+            return np.zeros((0,), dtype=np.float32)
+        return np.asarray(self.prior_feature_matrix[row_idx], dtype=np.float32)
 
     def _build_perturbation_indices(self) -> np.ndarray:
         result = np.zeros((len(self.df), 2), dtype=np.int64)

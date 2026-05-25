@@ -1463,3 +1463,30 @@ python utils/01_validate_standardized_outputs.py
   - 直接增强 expression fusion、增大模型容量、或加入 cell-type auxiliary classification 都没有提升 unseen cell；
   - unseen cell 当前最可靠的小幅提升来自 `MSE_WEIGHT=0.075`，AUPRC `0.767008`，比历史 full covariate UNK + `MSE_WEIGHT=0.10` 的 `0.761629` 高约 `+0.0054`；
   - 该设置不适合作为 cell-type 默认，cell-type 仍使用 full covariate UNK dropout `0.15` + `MSE_WEIGHT=0.10`。
+
+## 2026-05-25 11:39 HKT Unseen Cell Deep-Research Plan Implementation
+
+- Implemented additional default-off experiment modules for the unseen-cell plan:
+  - train-only KNN drug-response prior features from control-expression prototypes (`--cell-prior-mode knn_drug`);
+  - optional learned/fixed prior logit adapters (`--cell-prior-logit-scale`, `--cell-prior-fixed-logit-scale`);
+  - cell-conditioned pair FiLM (`--cell-pair-film-scale`);
+  - supervised contrastive loss over raw covariates (`--aux-covariate-contrastive-*`);
+  - within-covariate ranking loss (`--ranking-loss-*`);
+  - fold-train-only gene weighting for MSE (`--mse-gene-weight-mode {variance,pdi,variance_pdi}`);
+  - optional pair auxiliary logit gate (`--pair-logit-gate`).
+- Data handling changes are limited to the fast training dataset and do not modify processed data or data-processing scripts:
+  - `FastProteinTalkDataset` now returns both mapped covariates and raw covariates, so auxiliary losses can use true raw labels while the main model still uses UNK-mapped covariates;
+  - optional `prior_features` are passed per row only when enabled.
+- Full 5-fold / bottleneck results on `single_cell_5fold`, 1 GPU, batch size 256, full covariate UNK dropout `0.15`:
+  - current baseline (`MSE_WEIGHT=0.075`): AUROC `0.934443`, AUPRC `0.767008`;
+  - `MSE_WEIGHT=0.05`: AUROC `0.931399`, AUPRC `0.762206`;
+  - pair auxiliary logit scale `1.0`: AUROC `0.929817`, AUPRC `0.760380`;
+  - pair auxiliary logit scale `2.0`: AUROC `0.931444`, AUPRC `0.763142`;
+  - KNN drug prior, learned/fixed prior, contrastive loss, ranking loss, larger hidden dim, positive sampler, MSE inactive reweighting, and variance-weighted MSE were tested on bottleneck folds 2/4 and did not beat the baseline bottleneck pattern.
+- Cell-type sanity check:
+  - current branch baseline full 5-fold (`MSE_WEIGHT=0.075`): AUROC `0.941852`, AUPRC `0.810250`;
+  - `MSE_WEIGHT=0.10 + pair_logit_scale=2.0` was tested on folds 0/1 only and gave AUPRC `0.775353` / `0.714756`, not promising enough to continue.
+- Conclusion:
+  - no tested lightweight plan component reliably moves unseen cell AUPRC toward `0.85`;
+  - the proposed train-only priors are strong as offline diagnostics but degrade the learned model on fold 2, so they remain experimental and default-off;
+  - recommended unseen-cell setting remains full covariate UNK dropout `0.15` with `MSE_WEIGHT=0.075`.
