@@ -1513,3 +1513,26 @@ python utils/01_validate_standardized_outputs.py
 - Conclusion:
   - the cell-type semantic embedding path is deployable and biologically cleaner than raw categorical `cell_type`;
   - current gain is negligible (`+0.00022` AUPRC) and AUROC drops, so it should remain an ablation/optional module rather than a new default.
+
+## 2026-05-25 15:46 HKT Fold0 Covariate Analysis Implementation
+
+- Added a covariate ablation/diagnostic workflow without changing data-processing scripts or data files:
+  - `scripts/run_covariate_ablation_fold0_2gpu.sh` runs fold0 unseen-drug and unseen-cell covariate profiles across two GPUs;
+  - `scripts/covariate_analysis_report.py` summarizes run manifests plus split-level covariate coverage/unseen-category diagnostics;
+  - `scripts/ptv3_experiment_common.sh` now supports optional `BATCH_COV_LIST` env passthrough. Default behavior is unchanged when this env var is unset.
+- Completed 38 fresh fold0 runs under `EXP_PREFIX=20260525_covariate_fold0_v1`; all runs reached `fit_completed` and `test_completed`.
+- Final report artifacts:
+  - `logs/20260525_covariate_fold0_v1_covariate_analysis.md`;
+  - `logs/20260525_covariate_fold0_v1_covariate_analysis.json`;
+  - `logs/20260525_covariate_fold0_v1_runtime_summary.tsv`.
+- Key fold0 results versus the fresh full-covariate baseline:
+  - unseen drug fold0 full baseline: AUROC `0.8448`, AUPRC `0.5565`;
+  - unseen drug best profile was `drop_batch` (`machineID_new, Cell_plate, Cell, cell_type, pert_time`): AUROC `0.8565`, AUPRC `0.5870`, AUPRC delta `+0.0305`;
+  - unseen cell fold0 full baseline: AUROC `0.8949`, AUPRC `0.7871`;
+  - unseen cell best profile was `cell_identity_only` (`Cell, cell_type`): AUROC `0.9061`, AUPRC `0.8407`, AUPRC delta `+0.0536`;
+  - the more reliable unseen-category variant `cell_identity_covunk015` reached AUROC `0.9088`, AUPRC `0.8393`, AUPRC delta `+0.0522`;
+  - full covariate UNK dropout `0.15` reached unseen cell AUROC `0.9189`, AUPRC `0.8394`, AUPRC delta `+0.0524`.
+- Split diagnostics:
+  - unseen drug fold0 has almost no unseen covariate categories in test, except tiny `Cell_plate`/`batch` tails;
+  - unseen cell fold0 has severe covariate shift: `Cell_plate` and `Cell` test rows are `100%` train-unseen, `batch` test rows are `91.67%` train-unseen, and `cell_type` test rows are `27.25%` train-unseen;
+  - this supports treating high-cardinality technical covariates as risky in unseen-cell evaluation.
