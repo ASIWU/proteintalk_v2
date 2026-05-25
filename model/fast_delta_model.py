@@ -115,6 +115,9 @@ class FastDeltaDrugResponseModel(nn.Module):
         target_expression_init_scale: float = 0.1,
         target_expression_seed: int = 29,
         target_expression_fusion_mode: str = "piece",
+        target_expression_cell_gate_mode: str = "off",
+        target_expression_cell_gate_scale: float = 0.0,
+        target_expression_cell_gate_temperature: float = 1.0,
         protein_concat_mode: str = "off",
         protein_concat_dim: int = 64,
         protein_concat_topk: int = 512,
@@ -170,6 +173,15 @@ class FastDeltaDrugResponseModel(nn.Module):
         self.target_expression_fusion_mode = str(target_expression_fusion_mode).lower()
         if self.target_expression_fusion_mode not in {"piece", "control_add", "pair_add"}:
             raise ValueError("target_expression_fusion_mode must be piece, control_add, or pair_add")
+        self.target_expression_cell_gate_mode = str(target_expression_cell_gate_mode).lower()
+        if self.target_expression_cell_gate_mode not in {"off", "magnitude", "signed"}:
+            raise ValueError("target_expression_cell_gate_mode must be off, magnitude, or signed")
+        self.target_expression_cell_gate_scale = float(target_expression_cell_gate_scale)
+        if self.target_expression_cell_gate_scale < 0.0:
+            raise ValueError("target_expression_cell_gate_scale must be non-negative")
+        self.target_expression_cell_gate_temperature = float(target_expression_cell_gate_temperature)
+        if self.target_expression_cell_gate_temperature <= 0.0:
+            raise ValueError("target_expression_cell_gate_temperature must be positive")
         self.protein_concat_mode = str(protein_concat_mode).lower()
         if self.protein_concat_mode not in {"off", "pcep", "pcep_cell", "pcep_dual"}:
             raise ValueError("protein_concat_mode must be off, pcep, pcep_cell, or pcep_dual")
@@ -825,6 +837,7 @@ class FastDeltaDrugResponseModel(nn.Module):
             )
             expanded_expression = normalized_expression.unsqueeze(1).expand(-1, 2, -1)
             selected_expression = torch.gather(expanded_expression, dim=2, index=gene_indices)
+            weights = self._target_expression_cell_gated_weights(weights, selected_expression)
             selected_features = protein_features[gene_indices]
             pooled = (selected_features * (weights * selected_expression).unsqueeze(-1)).sum(dim=2)
         else:
@@ -832,6 +845,7 @@ class FastDeltaDrugResponseModel(nn.Module):
                 device=normalized_expression.device,
                 dtype=normalized_expression.dtype,
             )
+            weights = self._target_expression_cell_gated_weights(weights, normalized_expression.unsqueeze(1))
             weighted_expression = weights * normalized_expression.unsqueeze(1)
             pooled = torch.matmul(weighted_expression, protein_features)
         context1 = pooled[:, 0, :]
@@ -846,6 +860,26 @@ class FastDeltaDrugResponseModel(nn.Module):
         )
         encoded = self.target_expression_encoder(pair_context)
         return self.target_expression_scale.to(encoded.dtype) * encoded
+
+    def _target_expression_cell_gated_weights(
+        self,
+        weights: torch.Tensor,
+        selected_expression: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.target_expression_cell_gate_mode == "off" or self.target_expression_cell_gate_scale <= 0.0:
+            return weights
+        valid = weights > 0.0
+        if self.target_expression_cell_gate_mode == "magnitude":
+            cell_signal = selected_expression.abs()
+        elif self.target_expression_cell_gate_mode == "signed":
+            cell_signal = selected_expression
+        else:
+            raise RuntimeError(f"unsupported target expression cell gate: {self.target_expression_cell_gate_mode!r}")
+        logits = torch.log(weights.clamp_min(1e-8)) + float(self.target_expression_cell_gate_scale) * cell_signal
+        logits = logits / float(self.target_expression_cell_gate_temperature)
+        logits = logits.masked_fill(~valid, -torch.inf)
+        gated = torch.softmax(logits, dim=-1)
+        return torch.nan_to_num(gated, nan=0.0, posinf=0.0, neginf=0.0)
 
     def _encode_prior_features(
         self,

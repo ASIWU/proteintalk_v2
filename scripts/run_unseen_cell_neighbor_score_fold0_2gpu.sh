@@ -11,7 +11,7 @@ if ! conda activate flow_v2; then
 fi
 
 PYTHON_BIN="${PYTHON_BIN:-/mnt/shared-storage-user/wuhao/miniconda3/envs/flow_v2/bin/python}"
-BASE_EXP_PREFIX="${EXP_PREFIX:-$(date +%Y%m%d_%H%M)_targetexpr_pairadd_cell_5fold}"
+BASE_EXP_PREFIX="${EXP_PREFIX:-$(date +%Y%m%d_%H%M)_neighbor_score_cell_fold0}"
 GPU_IDS="${GPU_IDS:-0,1}"
 LOG_DIR="${LOG_DIR:-logs}"
 mkdir -p "${LOG_DIR}"
@@ -30,15 +30,24 @@ fi
   model/fast_lightning.py \
   model/graph_feature_utils.py
 
-read -r -a FOLD_ARRAY <<< "${FOLDS:-0 1 2 3 4}"
+VARIANTS=(
+  "raw_pairadd:256:raw:0.0:off:0.0:1.0"
+  "sym_norm:256:symmetric:0.0:off:0.0:1.0"
+  "degree_penalty05:256:raw:0.5:off:0.0:1.0"
+  "cell_mag10:256:raw:0.0:magnitude:1.0:1.0"
+  "cell_signed10:256:raw:0.0:signed:1.0:1.0"
+  "top128_cell_mag10:128:raw:0.0:magnitude:1.0:1.0"
+  "top512_cell_mag10:512:raw:0.0:magnitude:1.0:1.0"
+)
 
-run_fold() {
+run_variant() {
   local gpu_id="$1"
-  local fold="$2"
-  echo "[run][gpu=${gpu_id}] fold=${fold}"
+  local spec="$2"
+  IFS=':' read -r name topk ppi_norm degree_penalty gate_mode gate_scale gate_temp <<< "${spec}"
+  echo "[run][gpu=${gpu_id}] ${name} topk=${topk} norm=${ppi_norm} degree=${degree_penalty} gate=${gate_mode}:${gate_scale}/T${gate_temp}"
   GPU_IDS="${gpu_id}" \
-  EXP_PREFIX="${BASE_EXP_PREFIX}" \
-  FOLDS="${fold}" \
+  EXP_PREFIX="${BASE_EXP_PREFIX}_${name}" \
+  FOLDS="0" \
   RUN_PREFLIGHT=0 \
   RUN_INFERENCE=0 \
   LOGGER_BACKEND="${LOGGER_BACKEND:-none}" \
@@ -55,27 +64,27 @@ run_fold() {
   COVARIATE_UNK_DROPOUT="${COVARIATE_UNK_DROPOUT:-0.15}" \
   TARGET_EXPRESSION_MODE=pdi_ppi \
   TARGET_EXPRESSION_FUSION_MODE=pair_add \
-  TARGET_EXPRESSION_TOPK="${TARGET_EXPRESSION_TOPK:-256}" \
+  TARGET_EXPRESSION_TOPK="${topk}" \
   TARGET_EXPRESSION_PPI_TOPK="${TARGET_EXPRESSION_PPI_TOPK:-32}" \
   TARGET_EXPRESSION_PPI_ALPHA="${TARGET_EXPRESSION_PPI_ALPHA:-0.5}" \
-  TARGET_EXPRESSION_PPI_NORM="${TARGET_EXPRESSION_PPI_NORM:-raw}" \
-  TARGET_EXPRESSION_DEGREE_PENALTY="${TARGET_EXPRESSION_DEGREE_PENALTY:-0.0}" \
   TARGET_EXPRESSION_INIT_SCALE="${TARGET_EXPRESSION_INIT_SCALE:-0.5}" \
-  TARGET_EXPRESSION_CELL_GATE_MODE="${TARGET_EXPRESSION_CELL_GATE_MODE:-off}" \
-  TARGET_EXPRESSION_CELL_GATE_SCALE="${TARGET_EXPRESSION_CELL_GATE_SCALE:-0.0}" \
-  TARGET_EXPRESSION_CELL_GATE_TEMPERATURE="${TARGET_EXPRESSION_CELL_GATE_TEMPERATURE:-1.0}" \
+  TARGET_EXPRESSION_PPI_NORM="${ppi_norm}" \
+  TARGET_EXPRESSION_DEGREE_PENALTY="${degree_penalty}" \
+  TARGET_EXPRESSION_CELL_GATE_MODE="${gate_mode}" \
+  TARGET_EXPRESSION_CELL_GATE_SCALE="${gate_scale}" \
+  TARGET_EXPRESSION_CELL_GATE_TEMPERATURE="${gate_temp}" \
   CELL_PAIR_FILM_SCALE=0.0 \
   ALLOW_EXISTING_RUN="${ALLOW_EXISTING_RUN:-0}" \
-  bash scripts/exp_03_single_cell_5fold.sh > "${LOG_DIR}/${BASE_EXP_PREFIX}_fold${fold}.log" 2>&1
-  echo "[done][gpu=${gpu_id}] fold=${fold}"
+  bash scripts/exp_03_single_cell_5fold.sh > "${LOG_DIR}/${BASE_EXP_PREFIX}_${name}.log" 2>&1
+  echo "[done][gpu=${gpu_id}] ${name}"
 }
 
 worker() {
   local slot="$1"
   local gpu_id="${GPU_ARRAY[$slot]}"
   local i
-  for ((i = slot; i < ${#FOLD_ARRAY[@]}; i += ${#GPU_ARRAY[@]})); do
-    run_fold "${gpu_id}" "${FOLD_ARRAY[$i]}"
+  for ((i = slot; i < ${#VARIANTS[@]}; i += ${#GPU_ARRAY[@]})); do
+    run_variant "${gpu_id}" "${VARIANTS[$i]}"
   done
 }
 
@@ -92,8 +101,8 @@ for pid in "${pids[@]}"; do
   fi
 done
 if [[ "${status}" -ne 0 ]]; then
-  echo "[error] at least one fold failed; inspect ${LOG_DIR}/${BASE_EXP_PREFIX}_fold*.log" >&2
+  echo "[error] at least one fold0 neighbor-score variant failed; inspect ${LOG_DIR}/${BASE_EXP_PREFIX}_*.log" >&2
   exit "${status}"
 fi
 
-echo "[done] target-expression pair_add 5-fold complete; EXP_PREFIX=${BASE_EXP_PREFIX}"
+echo "[done] neighbor-score fold0 variants complete; EXP_PREFIX=${BASE_EXP_PREFIX}"

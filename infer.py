@@ -251,9 +251,14 @@ LEGACY_FAST_MANIFEST_DEFAULTS = {
     "target_expression_topk": 256,
     "target_expression_ppi_topk": 32,
     "target_expression_ppi_alpha": 0.5,
+    "target_expression_ppi_norm": "raw",
+    "target_expression_degree_penalty": 0.0,
     "target_expression_init_scale": 0.1,
     "target_expression_seed": 29,
     "target_expression_fusion_mode": "piece",
+    "target_expression_cell_gate_mode": "off",
+    "target_expression_cell_gate_scale": 0.0,
+    "target_expression_cell_gate_temperature": 1.0,
     "protein_concat_init_scale": 0.1,
     "protein_concat_seed": 23,
     "protein_concat_score_mode": "multiply",
@@ -300,9 +305,14 @@ def current_fast_model_config(args) -> dict[str, object]:
         "target_expression_topk": args.target_expression_topk,
         "target_expression_ppi_topk": args.target_expression_ppi_topk,
         "target_expression_ppi_alpha": args.target_expression_ppi_alpha,
+        "target_expression_ppi_norm": args.target_expression_ppi_norm,
+        "target_expression_degree_penalty": args.target_expression_degree_penalty,
         "target_expression_init_scale": args.target_expression_init_scale,
         "target_expression_seed": args.target_expression_seed,
         "target_expression_fusion_mode": args.target_expression_fusion_mode,
+        "target_expression_cell_gate_mode": args.target_expression_cell_gate_mode,
+        "target_expression_cell_gate_scale": args.target_expression_cell_gate_scale,
+        "target_expression_cell_gate_temperature": args.target_expression_cell_gate_temperature,
         "protein_concat_mode": args.protein_concat_mode,
         "protein_concat_dim": args.protein_concat_dim,
         "protein_concat_topk": args.protein_concat_topk,
@@ -578,6 +588,9 @@ def run_fast_inference(args) -> None:
         target_expression_init_scale=args.target_expression_init_scale,
         target_expression_seed=args.target_expression_seed,
         target_expression_fusion_mode=args.target_expression_fusion_mode,
+        target_expression_cell_gate_mode=args.target_expression_cell_gate_mode,
+        target_expression_cell_gate_scale=args.target_expression_cell_gate_scale,
+        target_expression_cell_gate_temperature=args.target_expression_cell_gate_temperature,
         protein_concat_mode=args.protein_concat_mode,
         protein_concat_dim=args.protein_concat_dim,
         protein_concat_topk=args.protein_concat_topk,
@@ -858,6 +871,8 @@ def main() -> None:
     parser.add_argument("--target-expression-topk", type=int, default=256)
     parser.add_argument("--target-expression-ppi-topk", type=int, default=32)
     parser.add_argument("--target-expression-ppi-alpha", type=float, default=0.5)
+    parser.add_argument("--target-expression-ppi-norm", choices=["raw", "row", "symmetric"], default="raw")
+    parser.add_argument("--target-expression-degree-penalty", type=float, default=0.0)
     parser.add_argument("--target-expression-init-scale", type=float, default=0.1)
     parser.add_argument("--target-expression-seed", type=int, default=29)
     parser.add_argument(
@@ -865,6 +880,13 @@ def main() -> None:
         choices=["piece", "control_add", "pair_add"],
         default="piece",
     )
+    parser.add_argument(
+        "--target-expression-cell-gate-mode",
+        choices=["off", "magnitude", "signed"],
+        default="off",
+    )
+    parser.add_argument("--target-expression-cell-gate-scale", type=float, default=0.0)
+    parser.add_argument("--target-expression-cell-gate-temperature", type=float, default=1.0)
     parser.add_argument("--target-expression-chunk-size", type=int, default=64)
     parser.add_argument("--target-expression-cache-dir", default="")
     parser.add_argument("--force-target-expression-cache-rebuild", action="store_true")

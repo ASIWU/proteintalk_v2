@@ -216,6 +216,12 @@ def build_fast_target_expression_weights(
     ppi_alpha = float(getattr(args, "target_expression_ppi_alpha", 0.5))
     if ppi_alpha < 0.0:
         raise ValueError("target_expression_ppi_alpha must be non-negative")
+    ppi_norm = str(getattr(args, "target_expression_ppi_norm", "raw")).lower()
+    if ppi_norm not in {"raw", "row", "symmetric"}:
+        raise ValueError("target_expression_ppi_norm must be raw, row, or symmetric")
+    degree_penalty = float(getattr(args, "target_expression_degree_penalty", 0.0))
+    if degree_penalty < 0.0:
+        raise ValueError("target_expression_degree_penalty must be non-negative")
     chunk_size = max(1, int(getattr(args, "target_expression_chunk_size", 64)))
 
     pdi_matrix_path = Path(pdi_matrix_path)
@@ -232,6 +238,8 @@ def build_fast_target_expression_weights(
         "final_topk": int(final_topk),
         "ppi_topk": int(ppi_topk),
         "ppi_alpha": float(ppi_alpha),
+        "ppi_norm": ppi_norm,
+        "degree_penalty": float(degree_penalty),
         "pdi": _file_signature(pdi_matrix_path),
         "ppi": _file_signature(ppi_matrix_path) if mode == "pdi_ppi" else None,
     }
@@ -254,16 +262,27 @@ def build_fast_target_expression_weights(
         raise ValueError("no expression genes overlap the PDI protein axis")
     final_topk = min(final_topk, int(len(ordered)))
     ppi = None
+    ppi_degree = None
     if mode == "pdi_ppi" and ppi_topk > 0 and ppi_alpha > 0.0:
         ppi = np.load(ppi_matrix_path, mmap_mode="r")
         if ppi.ndim != 2 or ppi.shape[0] != n_proteins or ppi.shape[1] <= int(ordered[valid_gene].max(initial=0)):
             raise ValueError(f"PPI matrix shape {ppi.shape} is incompatible with PDI proteins and expression axis")
+        if ppi_norm != "raw" or degree_penalty > 0.0:
+            ppi_degree = np.asarray(ppi, dtype=np.float32).sum(axis=1)
+            ppi_degree = np.nan_to_num(ppi_degree, nan=0.0, posinf=0.0, neginf=0.0)
+    elif degree_penalty > 0.0:
+        ppi = np.load(ppi_matrix_path, mmap_mode="r")
+        if ppi.ndim != 2 or ppi.shape[1] <= int(ordered[valid_gene].max(initial=0)):
+            raise ValueError(f"PPI matrix shape {ppi.shape} is incompatible with expression axis")
+        ppi_degree = np.asarray(ppi, dtype=np.float32).sum(axis=1)
+        ppi_degree = np.nan_to_num(ppi_degree, nan=0.0, posinf=0.0, neginf=0.0)
 
     weights_out = np.zeros((n_drugs, int(len(ordered))), dtype=np.float16)
     direct_positive_rows = 0
     output_positive_rows = 0
     ppi_expanded_rows = 0
     valid_ordered = ordered[valid_gene]
+    valid_gene_degree = ppi_degree[valid_ordered].astype(np.float32, copy=False) if ppi_degree is not None else None
     for start in range(0, n_drugs, chunk_size):
         end = min(start + chunk_size, n_drugs)
         pdi_block = np.asarray(pdi[start:end], dtype=np.float32)
@@ -274,7 +293,7 @@ def build_fast_target_expression_weights(
         direct[:, valid_gene] = pdi_block[:, valid_ordered]
         direct_positive_rows += int((direct.sum(axis=1) > 0.0).sum())
         weights = direct
-        if ppi is not None:
+        if mode == "pdi_ppi" and ppi is not None:
             top_count = min(ppi_topk, n_proteins)
             if top_count > 0:
                 top_idx = np.argpartition(-pdi_block, kth=top_count - 1, axis=1)[:, :top_count]
@@ -285,6 +304,18 @@ def build_fast_target_expression_weights(
                 if active.any():
                     ppi_rows = np.asarray(ppi[top_idx.reshape(-1)][:, valid_ordered], dtype=np.float32)
                     ppi_rows = ppi_rows.reshape(block_size, top_count, valid_ordered.shape[0])
+                    if ppi_norm != "raw":
+                        source_degree = ppi_degree[top_idx].astype(np.float32, copy=False)
+                        if ppi_norm == "row":
+                            denominator = np.clip(source_degree[:, :, None], a_min=1e-6, a_max=None)
+                        elif ppi_norm == "symmetric":
+                            denominator = np.sqrt(
+                                np.clip(source_degree[:, :, None], a_min=1e-6, a_max=None)
+                                * np.clip(valid_gene_degree.reshape(1, 1, -1), a_min=1e-6, a_max=None)
+                            )
+                        else:
+                            raise RuntimeError(f"unsupported ppi_norm={ppi_norm!r}")
+                        ppi_rows = np.divide(ppi_rows, denominator, out=np.zeros_like(ppi_rows), where=denominator > 0.0)
                     expanded_valid = (ppi_rows * top_scores[:, :, None]).sum(axis=1)
                     expanded_valid = np.divide(
                         expanded_valid,
@@ -296,6 +327,9 @@ def build_fast_target_expression_weights(
                     expanded[:, valid_gene] = expanded_valid
                     weights = weights + ppi_alpha * expanded
                     ppi_expanded_rows += int(active.sum())
+        if degree_penalty > 0.0 and valid_gene_degree is not None:
+            penalty = np.power(np.clip(np.log1p(valid_gene_degree), a_min=1.0, a_max=None), -degree_penalty)
+            weights[:, valid_gene] = weights[:, valid_gene] * penalty.reshape(1, -1)
         weights = np.nan_to_num(weights, nan=0.0, posinf=0.0, neginf=0.0)
         weights = np.clip(weights, a_min=0.0, a_max=None)
         if final_topk > 0 and final_topk < weights.shape[1]:
@@ -339,6 +373,8 @@ def build_fast_target_expression_weights(
         "ppi_expanded_rows": int(ppi_expanded_rows),
         "output_positive_rows": int(output_positive_rows),
         "chunk_size": int(chunk_size),
+        "ppi_norm": ppi_norm,
+        "degree_penalty": float(degree_penalty),
     }
     dump_json(meta_path, json_safe(meta))
     return np.load(weight_path, mmap_mode="r"), meta
@@ -1338,6 +1374,9 @@ def run_fast_training(args: argparse.Namespace) -> None:
         target_expression_init_scale=args.target_expression_init_scale,
         target_expression_seed=args.target_expression_seed,
         target_expression_fusion_mode=args.target_expression_fusion_mode,
+        target_expression_cell_gate_mode=args.target_expression_cell_gate_mode,
+        target_expression_cell_gate_scale=args.target_expression_cell_gate_scale,
+        target_expression_cell_gate_temperature=args.target_expression_cell_gate_temperature,
         protein_concat_mode=args.protein_concat_mode,
         protein_concat_dim=args.protein_concat_dim,
         protein_concat_topk=args.protein_concat_topk,
@@ -1428,9 +1467,14 @@ def run_fast_training(args: argparse.Namespace) -> None:
         "target_expression_topk": args.target_expression_topk,
         "target_expression_ppi_topk": args.target_expression_ppi_topk,
         "target_expression_ppi_alpha": args.target_expression_ppi_alpha,
+        "target_expression_ppi_norm": args.target_expression_ppi_norm,
+        "target_expression_degree_penalty": args.target_expression_degree_penalty,
         "target_expression_init_scale": args.target_expression_init_scale,
         "target_expression_seed": args.target_expression_seed,
         "target_expression_fusion_mode": args.target_expression_fusion_mode,
+        "target_expression_cell_gate_mode": args.target_expression_cell_gate_mode,
+        "target_expression_cell_gate_scale": args.target_expression_cell_gate_scale,
+        "target_expression_cell_gate_temperature": args.target_expression_cell_gate_temperature,
         "target_expression_summary": json_safe(target_expression_summary),
         "graph_feature_meta": json_safe(graph_feature_meta),
         "protein_concat_mode": args.protein_concat_mode,
@@ -1799,6 +1843,8 @@ def main() -> None:
     parser.add_argument("--target-expression-topk", type=int, default=256)
     parser.add_argument("--target-expression-ppi-topk", type=int, default=32)
     parser.add_argument("--target-expression-ppi-alpha", type=float, default=0.5)
+    parser.add_argument("--target-expression-ppi-norm", choices=["raw", "row", "symmetric"], default="raw")
+    parser.add_argument("--target-expression-degree-penalty", type=float, default=0.0)
     parser.add_argument("--target-expression-init-scale", type=float, default=0.1)
     parser.add_argument("--target-expression-seed", type=int, default=29)
     parser.add_argument(
@@ -1806,6 +1852,13 @@ def main() -> None:
         choices=["piece", "control_add", "pair_add"],
         default="piece",
     )
+    parser.add_argument(
+        "--target-expression-cell-gate-mode",
+        choices=["off", "magnitude", "signed"],
+        default="off",
+    )
+    parser.add_argument("--target-expression-cell-gate-scale", type=float, default=0.0)
+    parser.add_argument("--target-expression-cell-gate-temperature", type=float, default=1.0)
     parser.add_argument("--target-expression-chunk-size", type=int, default=64)
     parser.add_argument("--target-expression-cache-dir", default="")
     parser.add_argument("--force-target-expression-cache-rebuild", action="store_true")

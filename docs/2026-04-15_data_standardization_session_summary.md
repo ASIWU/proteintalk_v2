@@ -1563,3 +1563,26 @@ python utils/01_validate_standardized_outputs.py
   - method2 (`cell_pair_film`) should not be adopted for unseen cell;
   - method1 is only useful in the conservative `pair_add` form and gives a small AUPRC gain, not enough to solve the `0.85` target;
   - recommended status is optional ablation / candidate unseen-cell setting, not a global default for every task.
+
+## 2026-05-25 18:02 HKT Target-Neighborhood Score Selection Iteration
+
+- Extended the default-off target-expression branch with explicit neighbor scoring controls:
+  - graph-side PPI score normalization via `--target-expression-ppi-norm {raw,row,symmetric}`;
+  - hub-aware score penalty via `--target-expression-degree-penalty`;
+  - cell-aware candidate reweighting via `--target-expression-cell-gate-mode {off,magnitude,signed}`, scale, and temperature.
+- Added `scripts/run_unseen_cell_neighbor_score_fold0_2gpu.sh` for fold0 neighbor-score screening; updated the pair-add 5-fold script to pass the new scoring/gating environment variables.
+- Fold0 screening on `single_cell_5fold_fold0`, same base setting as the previous pair-add branch:
+  - raw pair-add baseline: AUROC `0.922204`, AUPRC `0.847389`;
+  - symmetric degree-normalized PPI: AUROC `0.915830`, AUPRC `0.834186`;
+  - raw PPI with degree penalty `0.5`: AUROC `0.921243`, AUPRC `0.844042`;
+  - cell-expression magnitude gate scale `1.0`: AUROC `0.922484`, AUPRC `0.848715`;
+  - signed expression gate scale `1.0`: AUROC `0.918085`, AUPRC `0.841246`;
+  - top-k `128` with magnitude gate: AUROC `0.918404`, AUPRC `0.838637`;
+  - top-k `512` with magnitude gate: AUROC `0.915256`, AUPRC `0.835685`.
+- Full 5-fold for the best fold0 neighbor selector (`raw PDI/PPI pair-add + magnitude gate scale 1.0`):
+  - fold AUPRCs: `0.84871 + 0.76254 + 0.63437 + 0.81394 + 0.73749`;
+  - average AUROC/AUPRC: `0.929588 / 0.759410`.
+- Current conclusion:
+  - degree normalization and hub penalty are not useful for this artifact set; the raw PDI/PPI weights are stronger;
+  - cell-aware magnitude gating gives a small fold0 gain, but it is not stable across folds and hurts fold2/fold4;
+  - the recommended target-expression setting remains raw PDI/PPI `pair_add` without cell gate (`0.932174 / 0.773791`), while cell-aware gating is kept only as a negative/diagnostic ablation.
