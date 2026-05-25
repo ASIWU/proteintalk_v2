@@ -1490,3 +1490,26 @@ python utils/01_validate_standardized_outputs.py
   - no tested lightweight plan component reliably moves unseen cell AUPRC toward `0.85`;
   - the proposed train-only priors are strong as offline diagnostics but degrade the learned model on fold 2, so they remain experimental and default-off;
   - recommended unseen-cell setting remains full covariate UNK dropout `0.15` with `MSE_WEIGHT=0.075`.
+
+## 2026-05-25 15:10 HKT Cell-Type Text Foundation Embedding Experiment
+
+- Added an independent experiment folder `celltype_text_fm/`; root baseline model/training files were not modified.
+- Implemented SapBERT-based frozen cell-type semantic embeddings:
+  - current 8 `cell_type` labels are expanded into biomedical prompts such as cancer lineage/cell-line descriptions;
+  - SapBERT CLS embeddings are averaged per cell type and L2-normalized;
+  - row-level `(N, 768)` features are cached under `celltype_text_fm/artifacts/` and passed to the fast model via the existing `prior_features` path.
+- Network/download note:
+  - direct HuggingFace download was very slow;
+  - used `proxy_on2` from `~/.bashrc`, after which SapBERT download and dry-run succeeded.
+- Validation:
+  - `python -m py_compile celltype_text_fm/text_features.py celltype_text_fm/train_text_celltype.py` passed;
+  - `bash -n celltype_text_fm/run_bottleneck_2gpu.sh celltype_text_fm/run_folds_2gpu.sh` passed;
+  - dry-run produced `prior_features=(8, 768)`.
+- Results on `single_cell_5fold`, 1 GPU per fold, batch size 256, full covariate UNK dropout `0.15`, `MSE_WEIGHT=0.075`:
+  - baseline: AUROC `0.934443`, AUPRC `0.767008`;
+  - adding SapBERT text feature while keeping categorical `cell_type`, tested on folds 2/4: AUPRC `0.610205 / 0.782888`, unstable;
+  - replacing categorical `cell_type` with SapBERT text embedding: AUROC `0.929224`, AUPRC `0.767230`;
+  - adding text-logit scale `0.5` on folds 2/4 hurt fold4 and was rejected.
+- Conclusion:
+  - the cell-type semantic embedding path is deployable and biologically cleaner than raw categorical `cell_type`;
+  - current gain is negligible (`+0.00022` AUPRC) and AUROC drops, so it should remain an ablation/optional module rather than a new default.
