@@ -15,6 +15,7 @@ os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 import numpy as np
 import pandas as pd
 import torch
+from sklearn.metrics import average_precision_score, roc_auc_score
 from torch.utils.data import DataLoader
 
 from dataset.training_ready_dataset import (
@@ -44,6 +45,7 @@ from model.graph_feature_utils import build_or_load_graph_features
 from model.training_ready_lightning import ProteinTalkLightning, binary_metrics, compute_validation_metrics
 from model.training_ready_models import FAST_DELTA_MODEL_NAME, GRAPH_MODEL_NAMES, ModelArtifacts, SELECTED_MODEL_NAMES, build_model
 from train import (
+    build_fast_target_expression_weights,
     category_sizes,
     default_derived_paths,
     graph_feature_blocks_from_meta,
@@ -55,6 +57,7 @@ from train import (
 
 REPO_ROOT = Path(__file__).resolve().parent
 DEFAULT_TRAINING_READY_ROOT = REPO_ROOT / "data" / "training_ready"
+EXTRA_DOUBLE_TEST_LABEL_GROUPS = ("unseenCell_seenDrugCombo", "unseenCell_unseenDrugCombo")
 
 
 def iso_now() -> str:
@@ -65,6 +68,76 @@ def dump_json(path: Path, payload: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, ensure_ascii=False, indent=2, allow_nan=True)
+
+
+def append_optional_prediction_metadata(prediction_df: pd.DataFrame, rows: pd.DataFrame) -> pd.DataFrame:
+    for column in ("test", "test_label"):
+        if column in rows.columns:
+            prediction_df[column] = rows[column].tolist()
+    return prediction_df
+
+
+def binary_metrics_with_counts(y_true: np.ndarray, y_prob: np.ndarray, mask: np.ndarray | None = None) -> dict[str, float | int]:
+    y_true = np.asarray(y_true, dtype=np.float64).reshape(-1)
+    y_prob = np.asarray(y_prob, dtype=np.float64).reshape(-1)
+    keep = np.isfinite(y_true) & np.isfinite(y_prob)
+    if mask is not None:
+        keep &= np.asarray(mask, dtype=np.float64).reshape(-1) < 0.5
+    y_true = y_true[keep]
+    y_prob = y_prob[keep]
+    result: dict[str, float | int] = {
+        "auroc": float("nan"),
+        "auprc": float("nan"),
+        "auprc_baseline": float("nan"),
+        "nauprc": float("nan"),
+        "acc": float("nan"),
+        "valid_count": int(y_true.size),
+        "positive_count": int(np.sum(y_true == 1)) if y_true.size else 0,
+        "negative_count": int(np.sum(y_true == 0)) if y_true.size else 0,
+    }
+    if y_true.size == 0:
+        return result
+    baseline = float(np.mean(y_true == 1))
+    result["auprc_baseline"] = baseline
+    y_hat = (y_prob >= 0.5).astype(np.float64)
+    result["acc"] = float((y_hat == y_true).mean())
+    if np.unique(y_true).size >= 2:
+        auprc = float(average_precision_score(y_true, y_prob))
+        result["auroc"] = float(roc_auc_score(y_true, y_prob))
+        result["auprc"] = auprc
+        result["nauprc"] = auprc / baseline if baseline > 0 else float("nan")
+    return result
+
+
+def test_label_eval_mask(rows: pd.DataFrame) -> pd.Series:
+    test_raw = rows["test"]
+    test_numeric = pd.to_numeric(test_raw, errors="coerce")
+    test_text = test_raw.astype("string").fillna("").str.strip().str.lower()
+    test_eval = test_numeric.eq(1) | test_text.isin({"true", "yes", "y"})
+    labels = rows["test_label"].astype("string").fillna("").str.strip()
+    return test_eval & labels.ne("") & labels.str.lower().ne("delete")
+
+
+def task_metrics_by_test_label(
+    rows: pd.DataFrame,
+    y_true: np.ndarray,
+    y_prob: np.ndarray,
+    mask: np.ndarray | None,
+) -> dict[str, dict[str, float | int | str]]:
+    if "test" not in rows.columns or "test_label" not in rows.columns:
+        return {}
+    labels = rows["test_label"].astype("string").fillna("").str.strip()
+    eval_mask = test_label_eval_mask(rows).to_numpy(dtype=bool)
+    result: dict[str, dict[str, float | int | str]] = {}
+    for group in EXTRA_DOUBLE_TEST_LABEL_GROUPS:
+        group_mask = eval_mask & labels.eq(group).to_numpy(dtype=bool)
+        metrics = binary_metrics_with_counts(y_true[group_mask], y_prob[group_mask], None if mask is None else mask[group_mask])
+        metrics["test_label"] = group
+        result[group] = metrics
+    metrics = binary_metrics_with_counts(y_true[eval_mask], y_prob[eval_mask], None if mask is None else mask[eval_mask])
+    metrics["test_label"] = "combined"
+    result["combined"] = metrics
+    return result
 
 
 def move_to_device(obj, device: torch.device):
@@ -244,12 +317,33 @@ LEGACY_FAST_MANIFEST_DEFAULTS = {
     "graph_jump_temperature": 1.0,
     "pair_fusion_mode": "symmetric",
     "pair_type_features": False,
+    "cell_pair_film_scale": 0.0,
+    "target_expression_mode": "off",
+    "target_expression_dim": 64,
+    "target_expression_topk": 256,
+    "target_expression_ppi_topk": 32,
+    "target_expression_ppi_alpha": 0.5,
+    "target_expression_ppi_norm": "raw",
+    "target_expression_degree_penalty": 0.0,
+    "target_expression_init_scale": 0.1,
+    "target_expression_seed": 29,
+    "target_expression_fusion_mode": "piece",
+    "target_expression_cell_gate_mode": "off",
+    "target_expression_cell_gate_scale": 0.0,
+    "target_expression_cell_gate_temperature": 1.0,
     "protein_concat_init_scale": 0.1,
     "protein_concat_seed": 23,
+    "protein_concat_score_mode": "multiply",
+    "protein_concat_expr_scale": 1.0,
     "control_logit_scale": 0.0,
     "pair_logit_scale": 0.0,
     "target_logit_scale": 0.0,
     "covariate_logit_scale": 0.0,
+    "response_delta_mode": "off",
+    "response_delta_dim": 64,
+    "response_delta_seed": 31,
+    "response_delta_detach": False,
+    "delta_logit_scale": 0.0,
     "use_ddi": False,
     "residual_expression": True,
     "init_delta_scale": 0.1,
@@ -282,15 +376,36 @@ def current_fast_model_config(args) -> dict[str, object]:
         "graph_jump_temperature": args.graph_jump_temperature,
         "pair_fusion_mode": args.pair_fusion_mode,
         "pair_type_features": args.pair_type_features,
+        "cell_pair_film_scale": args.cell_pair_film_scale,
+        "target_expression_mode": args.target_expression_mode,
+        "target_expression_dim": args.target_expression_dim,
+        "target_expression_topk": args.target_expression_topk,
+        "target_expression_ppi_topk": args.target_expression_ppi_topk,
+        "target_expression_ppi_alpha": args.target_expression_ppi_alpha,
+        "target_expression_ppi_norm": args.target_expression_ppi_norm,
+        "target_expression_degree_penalty": args.target_expression_degree_penalty,
+        "target_expression_init_scale": args.target_expression_init_scale,
+        "target_expression_seed": args.target_expression_seed,
+        "target_expression_fusion_mode": args.target_expression_fusion_mode,
+        "target_expression_cell_gate_mode": args.target_expression_cell_gate_mode,
+        "target_expression_cell_gate_scale": args.target_expression_cell_gate_scale,
+        "target_expression_cell_gate_temperature": args.target_expression_cell_gate_temperature,
         "protein_concat_mode": args.protein_concat_mode,
         "protein_concat_dim": args.protein_concat_dim,
         "protein_concat_topk": args.protein_concat_topk,
         "protein_concat_init_scale": args.protein_concat_init_scale,
         "protein_concat_seed": args.protein_concat_seed,
+        "protein_concat_score_mode": args.protein_concat_score_mode,
+        "protein_concat_expr_scale": args.protein_concat_expr_scale,
         "control_logit_scale": args.control_logit_scale,
         "pair_logit_scale": args.pair_logit_scale,
         "target_logit_scale": args.target_logit_scale,
         "covariate_logit_scale": args.covariate_logit_scale,
+        "response_delta_mode": args.response_delta_mode,
+        "response_delta_dim": args.response_delta_dim,
+        "response_delta_seed": args.response_delta_seed,
+        "response_delta_detach": args.response_delta_detach,
+        "delta_logit_scale": args.delta_logit_scale,
         "batch_cov_list": args.batch_cov_list,
         "hidden_dim": args.hidden_dim,
         "expression_latent_dim": args.expression_latent_dim,
@@ -488,6 +603,14 @@ def run_fast_inference(args) -> None:
             include_multihop=args.graph_multihop,
             force_rebuild=args.force_graph_cache_rebuild,
         )
+    target_expression_weight_matrix, target_expression_summary = build_fast_target_expression_weights(
+        args=args,
+        artifacts=artifacts,
+        pdi_matrix_path=pdi_matrix_path,
+        ppi_matrix_path=ppi_matrix_path,
+        ordered_protein_index=checkpoint_axis,
+        cache_task_name=str(checkpoint_manifest.get("task_name") or args.task_name),
+    )
     ddi_matrix = np.load(ddi_matrix_path, mmap_mode="r") if args.use_ddi else None
     indices, row_to_set, set_info, split_dir = resolve_fast_inference_indices(args, artifacts)
     covariate_unknown_indices = fast_checkpoint_covariate_unknown_indices(
@@ -540,15 +663,32 @@ def run_fast_inference(args) -> None:
         graph_jump_temperature=args.graph_jump_temperature,
         pair_fusion_mode=args.pair_fusion_mode,
         pair_type_features=args.pair_type_features,
+        cell_pair_film_scale=args.cell_pair_film_scale,
+        target_expression_mode=args.target_expression_mode,
+        target_expression_weight_matrix=target_expression_weight_matrix,
+        target_expression_dim=args.target_expression_dim,
+        target_expression_init_scale=args.target_expression_init_scale,
+        target_expression_seed=args.target_expression_seed,
+        target_expression_fusion_mode=args.target_expression_fusion_mode,
+        target_expression_cell_gate_mode=args.target_expression_cell_gate_mode,
+        target_expression_cell_gate_scale=args.target_expression_cell_gate_scale,
+        target_expression_cell_gate_temperature=args.target_expression_cell_gate_temperature,
         protein_concat_mode=args.protein_concat_mode,
         protein_concat_dim=args.protein_concat_dim,
         protein_concat_topk=args.protein_concat_topk,
         protein_concat_init_scale=args.protein_concat_init_scale,
         protein_concat_seed=args.protein_concat_seed,
+        protein_concat_score_mode=args.protein_concat_score_mode,
+        protein_concat_expr_scale=args.protein_concat_expr_scale,
         control_logit_scale=args.control_logit_scale,
         pair_logit_scale=args.pair_logit_scale,
         target_logit_scale=args.target_logit_scale,
         covariate_logit_scale=args.covariate_logit_scale,
+        response_delta_mode=args.response_delta_mode,
+        response_delta_dim=args.response_delta_dim,
+        response_delta_seed=args.response_delta_seed,
+        response_delta_detach=args.response_delta_detach,
+        delta_logit_scale=args.delta_logit_scale,
         use_ddi=args.use_ddi,
         residual_expression=args.residual_expression,
         init_delta_scale=args.init_delta_scale,
@@ -579,7 +719,8 @@ def run_fast_inference(args) -> None:
             if args.limit_batches is not None and batch_idx >= args.limit_batches:
                 break
             batch = move_to_device(batch, device)
-            expression, logits1, logits2 = lightning_model(batch)
+            outputs = lightning_model(batch)
+            expression, logits1, logits2 = outputs[:3]
             prob1.append(torch.sigmoid(logits1.squeeze(-1)).detach().cpu().numpy())
             prob2.append(torch.sigmoid(logits2.squeeze(-1)).detach().cpu().numpy())
             true1_chunks.append(batch["label1"].detach().cpu().numpy())
@@ -628,6 +769,8 @@ def run_fast_inference(args) -> None:
             "synergy_label": rows.get(args.effective_key2, pd.Series([None] * len(rows))).tolist(),
         }
     )
+    prediction_df = append_optional_prediction_metadata(prediction_df, rows)
+    task_by_test_label = task_metrics_by_test_label(rows, active_true, active_prob, active_mask)
     output_dir = Path(args.output_dir) if args.output_dir else Path("outputs") / "inference" / args.task_name / args.model_type
     prediction_path = write_dataframe(output_dir / "predictions.parquet", prediction_df)
     response_metrics = fast_binary_metrics(true1, pred_prob1, mask1)
@@ -647,6 +790,8 @@ def run_fast_inference(args) -> None:
         "task1": response_metrics,
         "task2": synergy_metrics,
     }
+    if task_by_test_label:
+        metrics["task_by_test_label"] = task_by_test_label
     if args.save_expression_pred:
         expression_pred = np.concatenate(expression_chunks, axis=0) if expression_chunks else np.asarray([], dtype=np.float32)
         expression_true = (
@@ -714,6 +859,7 @@ def run_fast_inference(args) -> None:
             "limit_batches": args.limit_batches,
             "graph_feature_mode": args.graph_feature_mode,
             "graph_feature_meta": graph_feature_meta,
+            "target_expression_summary": target_expression_summary,
             "covariate_unk_fields": list(covariate_unknown_indices),
         },
     )
@@ -733,9 +879,9 @@ def main() -> None:
     parser.add_argument("--model-type", choices=sorted(SELECTED_MODEL_NAMES), default=FAST_DELTA_MODEL_NAME)
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--batch-size", type=int, default=256)
-    parser.add_argument("--hidden-dim", type=int, default=384)
-    parser.add_argument("--expression-latent-dim", type=int, default=512)
-    parser.add_argument("--covariate-embedding-dim", type=int, default=64)
+    parser.add_argument("--hidden-dim", type=int, default=512)
+    parser.add_argument("--expression-latent-dim", type=int, default=768)
+    parser.add_argument("--covariate-embedding-dim", type=int, default=96)
     parser.add_argument("--num-heads", type=int, default=8)
     parser.add_argument("--num-layers", type=int, default=4)
     parser.add_argument("--dropout", type=float, default=0.15)
@@ -810,15 +956,47 @@ def main() -> None:
         default="symmetric",
     )
     parser.add_argument("--pair-type-features", action="store_true")
-    parser.add_argument("--protein-concat-mode", choices=["off", "pcep"], default="pcep")
+    parser.add_argument("--cell-pair-film-scale", type=float, default=0.0)
+    parser.add_argument("--target-expression-mode", choices=["off", "pdi", "pdi_ppi"], default="off")
+    parser.add_argument("--target-expression-dim", type=int, default=64)
+    parser.add_argument("--target-expression-topk", type=int, default=256)
+    parser.add_argument("--target-expression-ppi-topk", type=int, default=32)
+    parser.add_argument("--target-expression-ppi-alpha", type=float, default=0.5)
+    parser.add_argument("--target-expression-ppi-norm", choices=["raw", "row", "symmetric"], default="raw")
+    parser.add_argument("--target-expression-degree-penalty", type=float, default=0.0)
+    parser.add_argument("--target-expression-init-scale", type=float, default=0.1)
+    parser.add_argument("--target-expression-seed", type=int, default=29)
+    parser.add_argument(
+        "--target-expression-fusion-mode",
+        choices=["piece", "control_add", "pair_add"],
+        default="piece",
+    )
+    parser.add_argument(
+        "--target-expression-cell-gate-mode",
+        choices=["off", "magnitude", "signed"],
+        default="off",
+    )
+    parser.add_argument("--target-expression-cell-gate-scale", type=float, default=0.0)
+    parser.add_argument("--target-expression-cell-gate-temperature", type=float, default=1.0)
+    parser.add_argument("--target-expression-chunk-size", type=int, default=64)
+    parser.add_argument("--target-expression-cache-dir", default="")
+    parser.add_argument("--force-target-expression-cache-rebuild", action="store_true")
+    parser.add_argument("--protein-concat-mode", choices=["off", "pcep", "pcep_cell", "pcep_dual"], default="pcep")
     parser.add_argument("--protein-concat-dim", type=int, default=64)
     parser.add_argument("--protein-concat-topk", type=int, default=512)
     parser.add_argument("--protein-concat-init-scale", type=float, default=0.1)
     parser.add_argument("--protein-concat-seed", type=int, default=23)
+    parser.add_argument("--protein-concat-score-mode", choices=["multiply", "additive", "magnitude"], default="multiply")
+    parser.add_argument("--protein-concat-expr-scale", type=float, default=1.0)
     parser.add_argument("--control-logit-scale", type=float, default=0.0)
     parser.add_argument("--pair-logit-scale", type=float, default=0.0)
     parser.add_argument("--target-logit-scale", type=float, default=0.0)
     parser.add_argument("--covariate-logit-scale", type=float, default=0.0)
+    parser.add_argument("--response-delta-mode", choices=["off", "summary", "gate"], default="off")
+    parser.add_argument("--response-delta-dim", type=int, default=64)
+    parser.add_argument("--response-delta-seed", type=int, default=31)
+    parser.add_argument("--response-delta-detach", action="store_true")
+    parser.add_argument("--delta-logit-scale", type=float, default=0.0)
     parser.add_argument("--use-ddi", action="store_true")
     parser.add_argument("--absolute-expression-head", action="store_false", dest="residual_expression")
     parser.add_argument("--init-delta-scale", type=float, default=0.1)
@@ -1017,6 +1195,8 @@ def main() -> None:
             "synergy_label": rows.get(args.effective_key2, pd.Series([None] * len(rows))).tolist(),
         }
     )
+    prediction_df = append_optional_prediction_metadata(prediction_df, rows)
+    task_by_test_label = task_metrics_by_test_label(rows, active_true, active_prob, active_mask)
     output_dir = Path(args.output_dir) if args.output_dir else Path("outputs") / "inference" / args.task_name / args.model_type
     prediction_path = write_dataframe(output_dir / "predictions.parquet", prediction_df)
     response_metrics = binary_metrics(
@@ -1044,6 +1224,8 @@ def main() -> None:
         "task1": response_metrics,
         "task2": synergy_metrics,
     }
+    if task_by_test_label:
+        metrics["task_by_test_label"] = task_by_test_label
     expression_pred = None
     if args.save_expression_pred:
         expression_pred = np.concatenate(expression_chunks, axis=0) if expression_chunks else np.asarray([], dtype=np.float32)

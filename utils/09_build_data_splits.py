@@ -46,6 +46,11 @@ PTV3_EXTRA_TEST_TASKS = {
     "ptv3_extra_doubledrug_nc",
     "ptv3_extra_doubledrug_nature",
 }
+PTV3_EXTRA_DOUBLE_TEST_TASKS = {
+    "ptv3_extra_doubledrug_guomics",
+    "ptv3_extra_doubledrug_nc",
+    "ptv3_extra_doubledrug_nature",
+}
 PTV1_MAIN = "ptv1_aivc"
 PTV1_EXTRA_TEST = "ptv1_extra_singledrug"
 
@@ -118,6 +123,38 @@ def as_bool_series(df: pd.DataFrame, column: str, default: bool = False) -> pd.S
         return values.fillna(default).astype(bool)
     lowered = values.astype("string").fillna("").str.lower().str.strip()
     return lowered.isin({"true", "1", "yes", "y"})
+
+
+def extra_double_evaluation_anchor_indices(df: pd.DataFrame, indices: list[int]) -> tuple[list[int], dict[str, Any]]:
+    if "test" not in df.columns or "test_label" not in df.columns:
+        return indices, {
+            "applied": False,
+            "reason": "missing test/test_label columns; kept all valid anchors",
+            "anchors_before_filter": len(indices),
+            "anchors_after_filter": len(indices),
+        }
+
+    test_raw = df["test"]
+    test_numeric = pd.to_numeric(test_raw, errors="coerce")
+    test_text = test_raw.astype("string").fillna("").str.strip().str.lower()
+    test_eval = test_numeric.eq(1) | test_text.isin({"true", "yes", "y"})
+    labels = df["test_label"].astype("string").fillna("").str.strip()
+    label_eval = labels.ne("") & labels.str.lower().ne("delete")
+    eval_mask = test_eval & label_eval
+    filtered = [int(idx) for idx in indices if bool(eval_mask.iloc[int(idx)])]
+
+    indexed_labels = labels.iloc[indices]
+    indexed_test = test_text.iloc[indices].where(test_text.iloc[indices].ne(""), "missing")
+    audit = {
+        "applied": True,
+        "rule": "test == 1 and test_label != delete",
+        "anchors_before_filter": len(indices),
+        "anchors_after_filter": len(filtered),
+        "removed_anchor_count": len(indices) - len(filtered),
+        "test_value_counts": {str(key): int(value) for key, value in indexed_test.value_counts(dropna=False).items()},
+        "test_label_counts": {str(key): int(value) for key, value in indexed_labels.value_counts(dropna=False).items()},
+    }
+    return filtered, audit
 
 
 def unique_sorted(indices: Iterable[int]) -> list[int]:
@@ -855,7 +892,16 @@ def build_task_splits(
             "For PTV3 main double-drug training, merged main single-drug anchors are appended to train only for every strategy. Native double-drug anchors still define the pert-pair folds and the valid/test splits."
         )
     elif dataset_group == "ptv3" and task_name in PTV3_EXTRA_TEST_TASKS:
-        payloads.append(make_test_only(anchor_indices))
+        test_only_indices = anchor_indices
+        if task_name in PTV3_EXTRA_DOUBLE_TEST_TASKS:
+            test_only_indices, filter_audit = extra_double_evaluation_anchor_indices(df, anchor_indices)
+            label_coverage_anchor_indices = test_only_indices
+            pairing_audit["extra_double_evaluation_filter"] = filter_audit
+            implementation_notes.append(
+                "For updated extra double-drug tasks, test_only excludes rows with test=0 or test_label=delete; "
+                "those rows remain in the feature table for audit only."
+            )
+        payloads.append(make_test_only(test_only_indices))
         implementation_notes.append(
             "The Step 3 doc explicitly marks extra_guomics, nc, and nature as test-only. The extra_singledrug tasks are also written as test_only because Step 4 lists extra_singledrug as inference input."
         )
@@ -913,7 +959,11 @@ def build_task_splits(
         "label_coverage_anchor_rule": (
             "primary double-drug anchors only"
             if dataset_group == "ptv3" and task_name == PTV3_MAIN_DOUBLE
-            else "all valid anchors"
+            else (
+                "test_label-filtered valid anchors"
+                if dataset_group == "ptv3" and task_name in PTV3_EXTRA_DOUBLE_TEST_TASKS
+                else "all valid anchors"
+            )
         ),
         "splits": split_summaries,
         "implementation_notes": implementation_notes,

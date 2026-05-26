@@ -835,6 +835,8 @@ def binary_metrics(prob: np.ndarray, true: np.ndarray, mask: np.ndarray) -> dict
     result = {
         "auroc": float("nan"),
         "auprc": float("nan"),
+        "auprc_baseline": float("nan"),
+        "nauprc": float("nan"),
         "acc": float("nan"),
         "valid_count": int(len(true)),
         "positive_count": int(np.sum(true == 1)) if len(true) else 0,
@@ -842,8 +844,12 @@ def binary_metrics(prob: np.ndarray, true: np.ndarray, mask: np.ndarray) -> dict
     }
     if len(true) == 0:
         return result
+    baseline = float(np.mean(true == 1))
+    result["auprc_baseline"] = baseline
     result["acc"] = accuracy(true, prob)
     if len(np.unique(true)) >= 2:
+        auprc = float(average_precision_score(true, prob))
         result["auroc"] = float(roc_auc_score(true, prob))
-        result["auprc"] = float(average_precision_score(true, prob))
+        result["auprc"] = auprc
+        result["nauprc"] = auprc / baseline if baseline > 0 else float("nan")
     return result

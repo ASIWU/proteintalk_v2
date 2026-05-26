@@ -1427,3 +1427,329 @@ python utils/01_validate_standardized_outputs.py
 - Validation:
   - `python -m py_compile train.py infer.py dataset/training_ready_fast_dataset.py model/fast_delta_model.py model/fast_lightning.py scripts/check_wandb_auth.py` passed;
   - smoke tested fast `infer.py` on a covariate UNK checkpoint with one test batch and wrote `outputs/smoke_covunk_infer_20260522/predictions.parquet`.
+
+## 2026-05-22 18:52 HKT Unseen Cell Representation/Loss Exploration
+
+- 在 clean `v2.2beta` 上创建实验分支 `exp/unseen-cell-representation-20260522`，保留 `924688e v2.2beta` 作为回退点。
+- 新增默认关闭的 expression/cell 表征实验开关：
+  - `--protein-concat-mode {off,pcep,pcep_cell,pcep_dual}`，其中 `pcep_cell` 用 control-expression hidden 查询 protein-expression pooling，`pcep_dual` 同时保留原 context query 和 expression query；
+  - `--protein-concat-score-mode {multiply,additive,magnitude}` 与 `--protein-concat-expr-scale`，用于替换 PCEP 中 expression 与 protein attention score 的融合方式；
+  - `--aux-covariate-loss-fields`、`--aux-covariate-loss-weight`、`--aux-covariate-loss-label-smoothing`，从 expression hidden 预测指定 covariate，作为 cell/cell-type auxiliary classification loss；
+  - `scripts/ptv3_experiment_common.sh` 增加上述参数和 covariate UNK env passthrough，默认全部关闭或保持旧值。
+- 校验：
+  - `python -m py_compile train.py infer.py model/fast_delta_model.py model/fast_lightning.py` 通过；
+  - `bash -n scripts/ptv3_experiment_common.sh scripts/exp_02_single_cell_type_5fold.sh scripts/exp_03_single_cell_5fold.sh` 通过；
+  - `pcep_dual + additive + aux cell_type` fast dry-run 前向通过，输出 expression/logit shape 正常。
+- 完成 unseen cell 5-fold 实验（1 GPU、batch size 256、logger off、full covariate UNK dropout `0.15` unless noted）：
+  - `pcep_dual + additive + topk1024`：AUROC `0.928647`，AUPRC `0.753787`；
+  - `pcep_cell + additive + topk512`：AUROC `0.926901`，AUPRC `0.752784`；
+  - 原 PCEP 改 `additive` scoring：AUROC `0.925741`，AUPRC `0.749050`；
+  - 原 PCEP 改 `magnitude` scoring：AUROC `0.927705`，AUPRC `0.740845`；
+  - auxiliary `cell_type` loss weight `0.05`：AUROC `0.929050`，AUPRC `0.750566`；
+  - auxiliary `cell_type` loss weight `0.01`：AUROC `0.928162`，AUPRC `0.725546`；
+  - `hidden_dim=512`、`expression_latent_dim=768`：AUROC `0.929532`，AUPRC `0.754120`；
+  - `hidden_dim=512`、`expression_latent_dim=768`、LR `2e-4`：AUROC `0.928268`，AUPRC `0.715438`；
+  - control-expression direct logit scale `0.5`：AUROC `0.926991`，AUPRC `0.756559`；
+  - control-expression direct logit scale `1.0`：AUROC `0.928378`，AUPRC `0.751017`。
+- Loss-weight sweep:
+  - current-code baseline rerun `MSE_WEIGHT=0.10`：AUROC `0.930024`，AUPRC `0.749969`；
+  - `MSE_WEIGHT=0.05`：AUROC `0.931399`，AUPRC `0.762206`;
+  - `MSE_WEIGHT=0.075`：AUROC `0.934443`，AUPRC `0.767008`;
+  - `MSE_WEIGHT=0.20`：AUROC `0.932208`，AUPRC `0.761342`;
+  - `MSE_WEIGHT=0.075` + drop `Cell` covariate：AUROC `0.929343`，AUPRC `0.744766`，不采用。
+- 对 unseen cell type 的确认实验：
+  - full covariate UNK dropout `0.15` + `MSE_WEIGHT=0.075`：AUROC `0.941852`，AUPRC `0.810250`，低于前一轮 cell-type best `0.814780/0.815947`，因此 cell type 仍建议保留 `MSE_WEIGHT=0.10`。
+- 当前结论：
+  - 直接增强 expression fusion、增大模型容量、或加入 cell-type auxiliary classification 都没有提升 unseen cell；
+  - unseen cell 当前最可靠的小幅提升来自 `MSE_WEIGHT=0.075`，AUPRC `0.767008`，比历史 full covariate UNK + `MSE_WEIGHT=0.10` 的 `0.761629` 高约 `+0.0054`；
+  - 该设置不适合作为 cell-type 默认，cell-type 仍使用 full covariate UNK dropout `0.15` + `MSE_WEIGHT=0.10`。
+
+## 2026-05-25 11:39 HKT Unseen Cell Deep-Research Plan Implementation
+
+- Implemented additional default-off experiment modules for the unseen-cell plan:
+  - train-only KNN drug-response prior features from control-expression prototypes (`--cell-prior-mode knn_drug`);
+  - optional learned/fixed prior logit adapters (`--cell-prior-logit-scale`, `--cell-prior-fixed-logit-scale`);
+  - cell-conditioned pair FiLM (`--cell-pair-film-scale`);
+  - supervised contrastive loss over raw covariates (`--aux-covariate-contrastive-*`);
+  - within-covariate ranking loss (`--ranking-loss-*`);
+  - fold-train-only gene weighting for MSE (`--mse-gene-weight-mode {variance,pdi,variance_pdi}`);
+  - optional pair auxiliary logit gate (`--pair-logit-gate`).
+- Data handling changes are limited to the fast training dataset and do not modify processed data or data-processing scripts:
+  - `FastProteinTalkDataset` now returns both mapped covariates and raw covariates, so auxiliary losses can use true raw labels while the main model still uses UNK-mapped covariates;
+  - optional `prior_features` are passed per row only when enabled.
+- Full 5-fold / bottleneck results on `single_cell_5fold`, 1 GPU, batch size 256, full covariate UNK dropout `0.15`:
+  - current baseline (`MSE_WEIGHT=0.075`): AUROC `0.934443`, AUPRC `0.767008`;
+  - `MSE_WEIGHT=0.05`: AUROC `0.931399`, AUPRC `0.762206`;
+  - pair auxiliary logit scale `1.0`: AUROC `0.929817`, AUPRC `0.760380`;
+  - pair auxiliary logit scale `2.0`: AUROC `0.931444`, AUPRC `0.763142`;
+  - KNN drug prior, learned/fixed prior, contrastive loss, ranking loss, larger hidden dim, positive sampler, MSE inactive reweighting, and variance-weighted MSE were tested on bottleneck folds 2/4 and did not beat the baseline bottleneck pattern.
+- Cell-type sanity check:
+  - current branch baseline full 5-fold (`MSE_WEIGHT=0.075`): AUROC `0.941852`, AUPRC `0.810250`;
+  - `MSE_WEIGHT=0.10 + pair_logit_scale=2.0` was tested on folds 0/1 only and gave AUPRC `0.775353` / `0.714756`, not promising enough to continue.
+- Conclusion:
+  - no tested lightweight plan component reliably moves unseen cell AUPRC toward `0.85`;
+  - the proposed train-only priors are strong as offline diagnostics but degrade the learned model on fold 2, so they remain experimental and default-off;
+  - recommended unseen-cell setting remains full covariate UNK dropout `0.15` with `MSE_WEIGHT=0.075`.
+
+## 2026-05-25 15:10 HKT Cell-Type Text Foundation Embedding Experiment
+
+- Added an independent experiment folder `celltype_text_fm/`; root baseline model/training files were not modified.
+- Implemented SapBERT-based frozen cell-type semantic embeddings:
+  - current 8 `cell_type` labels are expanded into biomedical prompts such as cancer lineage/cell-line descriptions;
+  - SapBERT CLS embeddings are averaged per cell type and L2-normalized;
+  - row-level `(N, 768)` features are cached under `celltype_text_fm/artifacts/` and passed to the fast model via the existing `prior_features` path.
+- Network/download note:
+  - direct HuggingFace download was very slow;
+  - used `proxy_on2` from `~/.bashrc`, after which SapBERT download and dry-run succeeded.
+- Validation:
+  - `python -m py_compile celltype_text_fm/text_features.py celltype_text_fm/train_text_celltype.py` passed;
+  - `bash -n celltype_text_fm/run_bottleneck_2gpu.sh celltype_text_fm/run_folds_2gpu.sh` passed;
+  - dry-run produced `prior_features=(8, 768)`.
+- Results on `single_cell_5fold`, 1 GPU per fold, batch size 256, full covariate UNK dropout `0.15`, `MSE_WEIGHT=0.075`:
+  - baseline: AUROC `0.934443`, AUPRC `0.767008`;
+  - adding SapBERT text feature while keeping categorical `cell_type`, tested on folds 2/4: AUPRC `0.610205 / 0.782888`, unstable;
+  - replacing categorical `cell_type` with SapBERT text embedding: AUROC `0.929224`, AUPRC `0.767230`;
+  - adding text-logit scale `0.5` on folds 2/4 hurt fold4 and was rejected.
+- Conclusion:
+  - the cell-type semantic embedding path is deployable and biologically cleaner than raw categorical `cell_type`;
+  - current gain is negligible (`+0.00022` AUPRC) and AUROC drops, so it should remain an ablation/optional module rather than a new default.
+
+## 2026-05-25 15:46 HKT Fold0 Covariate Analysis Implementation
+
+- Added a covariate ablation/diagnostic workflow without changing data-processing scripts or data files:
+  - `scripts/run_covariate_ablation_fold0_2gpu.sh` runs fold0 unseen-drug and unseen-cell covariate profiles across two GPUs;
+  - `scripts/covariate_analysis_report.py` summarizes run manifests plus split-level covariate coverage/unseen-category diagnostics;
+  - `scripts/ptv3_experiment_common.sh` now supports optional `BATCH_COV_LIST` env passthrough. Default behavior is unchanged when this env var is unset.
+- Completed 38 fresh fold0 runs under `EXP_PREFIX=20260525_covariate_fold0_v1`; all runs reached `fit_completed` and `test_completed`.
+- Final report artifacts:
+  - `logs/20260525_covariate_fold0_v1_covariate_analysis.md`;
+  - `logs/20260525_covariate_fold0_v1_covariate_analysis.json`;
+  - `logs/20260525_covariate_fold0_v1_runtime_summary.tsv`.
+- Key fold0 results versus the fresh full-covariate baseline:
+  - unseen drug fold0 full baseline: AUROC `0.8448`, AUPRC `0.5565`;
+  - unseen drug best profile was `drop_batch` (`machineID_new, Cell_plate, Cell, cell_type, pert_time`): AUROC `0.8565`, AUPRC `0.5870`, AUPRC delta `+0.0305`;
+  - unseen cell fold0 full baseline: AUROC `0.8949`, AUPRC `0.7871`;
+  - unseen cell best profile was `cell_identity_only` (`Cell, cell_type`): AUROC `0.9061`, AUPRC `0.8407`, AUPRC delta `+0.0536`;
+  - the more reliable unseen-category variant `cell_identity_covunk015` reached AUROC `0.9088`, AUPRC `0.8393`, AUPRC delta `+0.0522`;
+  - full covariate UNK dropout `0.15` reached unseen cell AUROC `0.9189`, AUPRC `0.8394`, AUPRC delta `+0.0524`.
+- Split diagnostics:
+  - unseen drug fold0 has almost no unseen covariate categories in test, except tiny `Cell_plate`/`batch` tails;
+  - unseen cell fold0 has severe covariate shift: `Cell_plate` and `Cell` test rows are `100%` train-unseen, `batch` test rows are `91.67%` train-unseen, and `cell_type` test rows are `27.25%` train-unseen;
+  - this supports treating high-cardinality technical covariates as risky in unseen-cell evaluation.
+
+## 2026-05-25 17:22 HKT Target-Expression and FiLM Unseen-Cell Iteration
+
+- Added default-off PDI/PPI-guided target-expression context for the fast model:
+  - `--target-expression-mode {off,pdi,pdi_ppi}` builds a cached drug-by-expression-gene weight matrix from existing `pdi_matrix.npy` and optional one-hop `ppi_matrix.npy`;
+  - the model converts the cached dense weights into sparse top-k `(gene_index, weight)` buffers, then pools control expression over drug-specific target/neighborhood proteins;
+  - fusion is configurable with `--target-expression-fusion-mode {piece,control_add,pair_add}`; the branch is zero-initialized so enabled runs start close to baseline;
+  - no data-processing code or source data files were modified.
+- Added parameter plumbing to `train.py`, `infer.py`, and `scripts/ptv3_experiment_common.sh`; defaults keep previous baseline behavior unchanged (`target_expression_mode=off`, `cell_pair_film_scale=0`).
+- Inference-side target-expression weights are built on the checkpoint protein axis, so extra-data inference can still align expression columns to the training checkpoint axis.
+- Added reproducibility scripts:
+  - `scripts/run_unseen_cell_targetexpr_film_fold0_2gpu.sh` for fold0 method1/method2 screening;
+  - `scripts/run_unseen_cell_targetexpr_pairadd_5fold_2gpu.sh` for the best target-expression pair-add 5-fold setting.
+- Fold0 screening on `single_cell_5fold_fold0`, 1 GPU, batch size 256, full covariate UNK dropout `0.15`, `MSE_WEIGHT=0.075`:
+  - fresh baseline: AUROC `0.914478`, AUPRC `0.846185`;
+  - FiLM-only was negative across scales: best tested AUPRC `0.834991`;
+  - target-expression as extra fusion piece was negative: best tested AUPRC `0.837257` after zero-init;
+  - target-expression `control_add` was below baseline: best tested AUPRC `0.840263`;
+  - target-expression `pair_add` was the only positive fold0 variant: AUROC `0.922204`, AUPRC `0.847389`.
+- Full 5-fold result for best method1 setting (`TARGET_EXPRESSION_MODE=pdi_ppi`, `TARGET_EXPRESSION_FUSION_MODE=pair_add`, top-k `256`, PPI top-k `32`, PPI alpha `0.5`, init scale `0.5`):
+  - fold AUPRCs: `0.84739 + 0.75910 + 0.66351 + 0.81629 + 0.78267`;
+  - average AUROC/AUPRC: `0.932174 / 0.773791`;
+  - compared with the current full covariate UNK + `MSE_WEIGHT=0.075` unseen-cell baseline (`0.934443 / 0.767008`), AUPRC improves by about `+0.0068` while AUROC drops by about `-0.0023`.
+- Current conclusion:
+  - method2 (`cell_pair_film`) should not be adopted for unseen cell;
+  - method1 is only useful in the conservative `pair_add` form and gives a small AUPRC gain, not enough to solve the `0.85` target;
+  - recommended status is optional ablation / candidate unseen-cell setting, not a global default for every task.
+
+## 2026-05-25 18:02 HKT Target-Neighborhood Score Selection Iteration
+
+- Extended the default-off target-expression branch with explicit neighbor scoring controls:
+  - graph-side PPI score normalization via `--target-expression-ppi-norm {raw,row,symmetric}`;
+  - hub-aware score penalty via `--target-expression-degree-penalty`;
+  - cell-aware candidate reweighting via `--target-expression-cell-gate-mode {off,magnitude,signed}`, scale, and temperature.
+- Added `scripts/run_unseen_cell_neighbor_score_fold0_2gpu.sh` for fold0 neighbor-score screening; updated the pair-add 5-fold script to pass the new scoring/gating environment variables.
+- Fold0 screening on `single_cell_5fold_fold0`, same base setting as the previous pair-add branch:
+  - raw pair-add baseline: AUROC `0.922204`, AUPRC `0.847389`;
+  - symmetric degree-normalized PPI: AUROC `0.915830`, AUPRC `0.834186`;
+  - raw PPI with degree penalty `0.5`: AUROC `0.921243`, AUPRC `0.844042`;
+  - cell-expression magnitude gate scale `1.0`: AUROC `0.922484`, AUPRC `0.848715`;
+  - signed expression gate scale `1.0`: AUROC `0.918085`, AUPRC `0.841246`;
+  - top-k `128` with magnitude gate: AUROC `0.918404`, AUPRC `0.838637`;
+  - top-k `512` with magnitude gate: AUROC `0.915256`, AUPRC `0.835685`.
+- Full 5-fold for the best fold0 neighbor selector (`raw PDI/PPI pair-add + magnitude gate scale 1.0`):
+  - fold AUPRCs: `0.84871 + 0.76254 + 0.63437 + 0.81394 + 0.73749`;
+  - average AUROC/AUPRC: `0.929588 / 0.759410`.
+- Current conclusion:
+  - degree normalization and hub penalty are not useful for this artifact set; the raw PDI/PPI weights are stronger;
+  - cell-aware magnitude gating gives a small fold0 gain, but it is not stable across folds and hurts fold2/fold4;
+  - the recommended target-expression setting remains raw PDI/PPI `pair_add` without cell gate (`0.932174 / 0.773791`), while cell-aware gating is kept only as a negative/diagnostic ablation.
+
+## 2026-05-25 19:49 HKT MSE-Gap Architecture Exploration
+
+- Added default-off architecture/loss switches to test whether expression reconstruction can become a stronger auxiliary task:
+  - `--response-delta-mode {off,summary,gate}` with `--delta-logit-scale`, `--response-delta-dim`, and `--response-delta-detach`;
+  - `--mse-target-mode {all,pdi,pdi_ppi,topvar_pdi}` for reconstruction loss over drug-specific PDI/PPI target proteins;
+  - `--mse-weight-schedule {constant,warmup_decay}` with decay controls.
+- Added `scripts/run_mse_gap_delta_screen_2gpu.sh` for paired with-MSE / w/o-MSE screening on two GPUs. Defaults keep baseline4 unchanged.
+- Validation:
+  - `python -m py_compile train.py infer.py model/fast_delta_model.py model/fast_lightning.py` passed;
+  - `bash -n scripts/ptv3_experiment_common.sh scripts/run_mse_gap_delta_screen_2gpu.sh` passed;
+  - dry-run and 1-epoch smoke passed for delta-gated response with PDI target MSE.
+- Fold0/fold2 screening on `ptv3_main_singledrug / pert_stratified_5fold`, 1 GPU per run, batch size 256:
+  - `delta_summary_pdi`: average AUPRC gap `+0.0490`, close to the 5-point target in the initial screen;
+  - `delta_gate_pdi`: average AUPRC gap `+0.0245`;
+  - PDI/PPI schedule, top-variance PDI schedule, full-gene delta variants, low-dimensional delta variants, and target-only MSE variants were unstable or below target.
+- Full 5-fold confirmation for the best fold0/fold2 candidate `delta_summary_pdi`:
+  - with MSE: AUROC `0.902626`, AUPRC `0.654613`;
+  - w/o MSE: AUROC `0.898656`, AUPRC `0.650194`;
+  - gap: AUROC `+0.003970`, AUPRC `+0.004418`;
+  - baseline4 remains stronger: AUROC `0.903489`, AUPRC `0.666491`, baseline4 w/o-MSE AUPRC gap `+0.021950`.
+- Conclusion:
+  - the tested delta-response and target-MSE architectures are useful as ablation modules but should not replace baseline4;
+  - the fold0/fold2 MSE-gap gain did not generalize to 5-fold because no-MSE was stronger on fold1/fold3;
+  - current reliable baseline remains baseline4, not the new MSE-gap variants.
+
+## 2026-05-25 20:54 HKT MSE-Gap Training Strategy Exploration
+
+- Added optional, default-off true EarlyStopping support:
+  - `--early-stopping-patience` and `--early-stopping-min-delta` in `train.py`;
+  - `EARLY_STOPPING_PATIENCE` and `EARLY_STOPPING_MIN_DELTA` plumbing in `scripts/ptv3_experiment_common.sh`;
+  - default behavior is unchanged because early stopping is disabled unless patience is explicitly set.
+- Extended `scripts/run_mse_gap_ckpt_strategy_2gpu.sh`:
+  - supports generic fixed-final-epoch strategies such as `last3`, `last5`, `last8`, `last10`, `last20`;
+  - supports `VARIANTS="mse"` or `VARIANTS="mse nomse"` so MSE-only sweeps can reuse a fixed no-MSE reference.
+- 5-fold paired training-strategy results on `ptv3_main_singledrug / pert_stratified_5fold`, 1 GPU per job, batch size 256:
+  - checkpoint metric `valid_auprc`: with/w/o AUPRC `0.652478 / 0.649925`, gap `+0.002553`;
+  - checkpoint metric `valid_auroc`: with/w/o AUPRC `0.646351 / 0.651120`, gap `-0.004769`;
+  - checkpoint metric `loss2`: with/w/o AUPRC `0.654020 / 0.660823`, gap `-0.006803`;
+  - checkpoint metric `total_loss`: with/w/o AUPRC `0.638232 / 0.660823`, gap `-0.022592`;
+  - fixed final epoch `last3 / last5 / last8 / last10 / last20` AUPRC gaps were `+0.006938 / +0.008071 / +0.023768 / +0.008423 / +0.012681`;
+  - best fixed-epoch result was `last8`, with/w/o AUROC `0.896146 / 0.886069`, with/w/o AUPRC `0.664738 / 0.640970`, AUPRC gap `+0.023768`.
+- MSE-weight and schedule sweeps under the best `last8` strategy:
+  - default `MSE_WEIGHT=0.25`: AUPRC gap `+0.023768`;
+  - `MSE_WEIGHT=0.5`: AUPRC gap `+0.020872`;
+  - `MSE_WEIGHT=1.0`: AUPRC gap `-0.002439`;
+  - `MSE_WEIGHT=0.5` with warmup-decay to `0.2x`: AUPRC gap `+0.020476`;
+  - `MSE_WEIGHT=1.0` with warmup-decay to `0.1x`: AUPRC gap `+0.013399`.
+- True EarlyStopping and short-budget best-checkpoint tests:
+  - `patience=3`, monitor `valid_auprc`: with/w/o AUPRC `0.662596 / 0.649925`, gap `+0.012671`;
+  - `patience=1`, monitor `valid_auprc`: with/w/o AUPRC `0.665790 / 0.667342`, gap `-0.001552`;
+  - `MAX_EPOCHS=5` with best valid AUPRC: with/w/o AUPRC `0.677288 / 0.669393`, gap `+0.007895`;
+  - `MAX_EPOCHS=8` with best valid AUPRC: with/w/o AUPRC `0.669420 / 0.654441`, gap `+0.014979`.
+- Conclusion:
+  - fair checkpoint/early-stop/MSE-weight training strategies did not expand the w/o-MSE AUPRC gap to 5 points;
+  - the strongest tested training-only setting is fixed final epoch `last8`, but its gap is only `+0.0238`;
+  - early stopping should remain optional infrastructure, not a default baseline change for the MSE ablation claim;
+  - no data files or data-processing code were modified.
+
+## 2026-05-26 12:05 HKT Model-Size Sweep on Unseen Drug/Cell
+
+- Added `scripts/run_model_size_sweep_2gpu.sh`:
+  - runs `fast_delta` capacity sweeps on `ptv3_main_singledrug` unseen-drug (`pert_stratified_5fold`) and unseen-cell (`cell_5fold`) splits;
+  - uses two single-GPU workers by default;
+  - keeps unseen-drug at baseline4 single-drug settings (`MSE_WEIGHT=0.25`, no covariate UNK);
+  - keeps unseen-cell at the current stronger full-covariate UNK setting (`MSE_WEIGHT=0.075`, `COVARIATE_UNK_DROPOUT=0.15`).
+- Added `scripts/model_size_sweep_report.py`:
+  - summarizes `run_manifest.json` files into markdown/json reports;
+  - supports merging multiple sweep prefixes for cross-run comparison.
+- Completed full 5-fold sweeps on 2 H200 GPUs:
+  - pure capacity / LR `3e-4`: `h128`, `h192`, `h256`, `h384`, `h512`, `h768`;
+  - large-model LR `2e-4`: `h384`, `h512`, `h768`;
+  - boundary large model: `h1024`, LR `2e-4`.
+- Final combined report:
+  - `logs/20260526_model_size_combined_report.md`;
+  - `logs/20260526_model_size_combined_report.json`.
+- Key results, compared against same-day `h384`, LR `3e-4` rerun:
+  - unseen drug baseline rerun: AUROC `0.896696`, AUPRC `0.652478`, `68.0s/fold`, `17.2M` params;
+  - unseen drug best: `h512`, LR `2e-4`, AUROC `0.903166`, AUPRC `0.677846`, `82.4s/fold`, `26.4M` params;
+  - unseen cell baseline rerun: AUROC `0.930355`, AUPRC `0.748441`, `68.2s/fold`, `17.2M` params;
+  - unseen cell best: `h768`, LR `2e-4`, AUROC `0.934922`, AUPRC `0.770017`, `100.6s/fold`, `40.8M` params;
+  - `h1024`, LR `2e-4` regressed on both tasks, so capacity appears saturated before 1024 hidden dim;
+  - `h128` is the fastest tested setting (`~55s/fold`, `5.6M` params) but loses unseen-drug AUPRC by about `0.0115` versus same-day `h384`.
+- Current recommendation:
+  - for unseen drug performance, use `h512` with LR `2e-4`;
+  - for unseen cell only, `h768` with LR `2e-4` is best but slower and only slightly above the historical `MSE_WEIGHT=0.075 + covUNK` reference (`0.767008` AUPRC);
+  - for efficiency-sensitive runs, `h128`/`h192` are viable compression ablations, but not the best-performance baseline.
+
+## 2026-05-26 13:27 HKT Default h512 Profile
+
+- Updated the default fast-delta model-size profile from h384 to h512:
+  - `HIDDEN_DIM`: `384` -> `512`;
+  - `EXPRESSION_LATENT_DIM`: `512` -> `768`;
+  - `COVARIATE_EMBEDDING_DIM`: `64` -> `96`.
+- Updated default learning rate from `3e-4` to `2e-4` so the no-env-var launcher matches the validated h512 full-suite setting.
+- Applied the defaults consistently in:
+  - `scripts/ptv3_experiment_common.sh`;
+  - `scripts/0521_baseline4_8gpu_parallel.sh`;
+  - `train.py`;
+  - `infer.py`;
+  - `model/fast_delta_model.py`;
+  - `scripts/README_ptv3_experiments.md`.
+- Reason:
+  - full `exp_01` to `exp_08` comparison showed h512 is the better single default than h768 because it is faster, stronger on the primary single unseen-drug split, and has stronger graph/MSE ablation gaps.
+- Validation:
+  - `bash -n scripts/ptv3_experiment_common.sh && bash -n scripts/0521_baseline4_task_specific_8gpu_parallel.sh && bash -n scripts/0521_baseline4_8gpu_parallel.sh` passed;
+  - `python -m py_compile train.py infer.py model/fast_delta_model.py` passed;
+  - sourcing `scripts/ptv3_experiment_common.sh` with size/LR variables unset prints `512 768 96 2e-4`.
+
+## 2026-05-26 14:22 HKT Extra Double-Drug test_label Evaluation
+
+- Added `scripts/report_extra_doubledrug_test_label_auprc.py` to recompute updated extra double-drug AUPRC from existing `predictions.parquet` files without rerunning GPU inference.
+- Updated Stage-1 extra double-drug standardization to prefer `data/rawdata/update_0526/extra_doubledrug/*_test_label.csv` and preserve raw `test` / `test_label` metadata.
+- Updated Step-3 split generation so `ptv3_extra_doubledrug_*` `test_only` excludes `test=0` / `test_label=delete` rows while retaining them in feature tables for audit.
+- Updated `infer.py` to carry `test` / `test_label` into predictions and emit `task_by_test_label` metrics when those columns exist.
+- Updated training-ready split validation to expect the same filtered extra double-drug `test_only` anchors.
+- Added normalized AUPRC reporting as `nauprc = auprc / auprc_baseline`, where `auprc_baseline = positive_count / valid_count`, because raw AUPRC is prevalence-sensitive.
+- `scripts/exp_08_extra_double_all_train_infer.sh` now prints and writes the extra double-drug `test_label` AUPRC/nAUPRC report after running Nature, NC, and Guomics inference.
+- Validation:
+  - `python -m py_compile scripts/report_extra_doubledrug_test_label_auprc.py scripts/show_extra_results.py infer.py model/fast_lightning.py model/training_ready_lightning.py utils/00_standardize_rawdata.py utils/09_build_data_splits.py utils/03_validate_training_ready_outputs.py` passed.
+  - `bash -n scripts/exp_08_extra_double_all_train_infer.sh` passed.
+  - Existing full extra-double predictions were post-processed successfully with evaluable counts: Guomics `3107`, NC `15155`, Nature `22956`.
+
+## 2026-05-26 16:22 HKT 2-GPU Full-Suite Launcher
+
+- Added `scripts/0526_baseline4_task_specific_2gpu_parallel.sh`.
+- The new launcher defaults to:
+  - `EXP_PREFIX=20260526_final_task_specific`;
+  - `GPU_IDS=0,1`;
+  - `DEVICES=1`;
+  - `RUN_EXTRA_TASKS=1`.
+- It keeps the task-specific single/double fast-delta defaults from `scripts/0521_baseline4_task_specific_8gpu_parallel.sh`.
+- It reuses the maintained full-suite scheduler `scripts/0521_baseline4_8gpu_parallel.sh`, so the execution flow remains `exp_01` through `exp_08`, including the updated extra double-drug `test_label` report in `exp_08`.
+- Validation:
+  - `bash -n scripts/0526_baseline4_task_specific_2gpu_parallel.sh` passed;
+  - `bash -n scripts/0521_baseline4_8gpu_parallel.sh` passed;
+  - script mode set to executable (`755`).
+
+## 2026-05-26 17:15 HKT h512 0526 Full-Suite Validation
+
+- Reviewed the current h512 baseline4 defaults and confirmed the active profile is:
+  - `HIDDEN_DIM=512`;
+  - `EXPRESSION_LATENT_DIM=768`;
+  - `COVARIATE_EMBEDDING_DIM=96`;
+  - `LEARNING_RATE=2e-4`.
+- Reviewed `scripts/0526_baseline4_task_specific_2gpu_parallel.sh`:
+  - constrains the maintained scheduler to `GPU_IDS=0,1` and `DEVICES=1`;
+  - preserves task-specific single/double settings from the baseline4 scheduler.
+- Updated `scripts/report_extra_doubledrug_test_label_auprc.py` so the extra double-drug grouped report includes AUROC and ACC in addition to AUPRC, prevalence baseline, nAUPRC, and counts.
+- Confirmed current extra double grouped reporting uses `feature_row_index` to join predictions back to `data/rawdata/update_0526/extra_doubledrug`, filters `test=1`, removes `test_label=delete`, and reports:
+  - `unseenCell_seenDrugCombo`;
+  - `unseenCell_unseenDrugCombo`;
+  - `combined`.
+- Validation passed:
+  - shell syntax checks for the 0526 launcher, 0521 scheduler, exp08 extra double script, and common experiment script;
+  - Python compile checks for `train.py`, `infer.py`, model modules, `scripts/show_extra_results.py`, and the grouped extra double report script.
+- Full 2-GPU run completed with all runtime rows successful:
+  - command: `WANDB_MODE=offline EXP_PREFIX=20260526_h512_nauprc_2gpu_offline_v1 GPU_IDS=0,1 bash scripts/0526_baseline4_task_specific_2gpu_parallel.sh`;
+  - runtime summary: `logs/20260526_h512_nauprc_2gpu_offline_v1_runtime_summary.tsv`;
+  - launcher log: `logs/20260526_h512_nauprc_2gpu_offline_v1_launcher.log`.
+- 5-fold averages from the run:
+  - single unseen drug: AUROC `0.903166`, AUPRC `0.677846`, nAUPRC `5.723701`;
+  - single unseen cell type: AUROC `0.933192`, AUPRC `0.792645`, nAUPRC `6.098465`;
+  - single unseen cell: AUROC `0.927191`, AUPRC `0.751375`, nAUPRC `6.228606`;
+  - single no MSE: AUROC `0.893265`, AUPRC `0.651609`, nAUPRC `5.499016`;
+  - single no graph: AUROC `0.853110`, AUPRC `0.579863`, nAUPRC `4.876731`;
+  - double unseen drug pair: AUROC `0.736534`, AUPRC `0.616861`, nAUPRC `1.526420`.

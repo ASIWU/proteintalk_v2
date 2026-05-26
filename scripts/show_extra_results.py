@@ -14,13 +14,15 @@ from typing import Any
 
 
 DEFAULT_OUTPUT_DIR = Path("outputs/20260513_extra_double_all_train_infer_all_single_double_for_extra")
-METRIC_KEYS = ("auroc", "auprc", "acc")
+METRIC_KEYS = ("auroc", "auprc", "auprc_baseline", "nauprc", "acc")
 COUNT_KEYS = ("valid_count", "positive_count", "negative_count", "count")
 DEFAULT_COLUMNS = (
     ("task_name", "task"),
     ("head", "head"),
     ("auroc", "auroc"),
     ("auprc", "auprc"),
+    ("auprc_baseline", "base"),
+    ("nauprc", "nauprc"),
     ("acc", "acc"),
     ("valid_count", "valid"),
     ("positive_count", "pos"),
@@ -32,6 +34,8 @@ AGGREGATE_COLUMNS = (
     ("datasets", "datasets"),
     ("mean_auroc", "mean_auroc"),
     ("mean_auprc", "mean_auprc"),
+    ("mean_auprc_baseline", "mean_base"),
+    ("mean_nauprc", "mean_nauprc"),
     ("mean_acc", "mean_acc"),
     ("valid_count", "valid_total"),
     ("positive_count", "pos_total"),
@@ -42,6 +46,8 @@ SORT_KEYS = (
     "head",
     "auroc",
     "auprc",
+    "auprc_baseline",
+    "nauprc",
     "acc",
     "valid_count",
     "positive_count",
@@ -51,6 +57,8 @@ SORT_KEYS = (
 NUMERIC_KEYS = {
     "auroc",
     "auprc",
+    "auprc_baseline",
+    "nauprc",
     "acc",
     "valid_count",
     "positive_count",
@@ -59,6 +67,8 @@ NUMERIC_KEYS = {
     "datasets",
     "mean_auroc",
     "mean_auprc",
+    "mean_auprc_baseline",
+    "mean_nauprc",
     "mean_acc",
 }
 

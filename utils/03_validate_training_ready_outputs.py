@@ -376,11 +376,11 @@ def validate_split_family(
         if strategy == "test_only":
             if split_lists["train"] or split_lists["valid"]:
                 failures.append(f"{task_name} test_only: train/valid must be empty")
-            anchors = default_primary_anchor_indices(feature_df)
-            if set(split_lists["test"]) != set(anchors):
+            expected, expected_rule = expected_test_only_indices(task_name, feature_df)
+            if set(split_lists["test"]) != set(expected):
                 failures.append(
-                    f"{task_name} test_only: test indices must equal primary non-control anchors; "
-                    f"test={len(split_lists['test'])} anchors={len(anchors)}"
+                    f"{task_name} test_only: test indices must equal {expected_rule}; "
+                    f"test={len(split_lists['test'])} expected={len(expected)}"
                 )
             validate_split_label_balance(
                 feature_df,
@@ -420,6 +420,22 @@ def default_primary_anchor_indices(df: pd.DataFrame) -> list[int]:
     source_role = df.get("source_row_role", pd.Series(["self"] * len(df), index=df.index)).astype("string").fillna("").str.strip()
     membership = df.get("feature_membership", pd.Series(["primary"] * len(df), index=df.index)).astype("string").fillna("").str.strip()
     return [int(idx) for idx in df.index[(~is_control) & source_role.eq("self") & membership.eq("primary")]]
+
+
+def expected_test_only_indices(task_name: str, df: pd.DataFrame) -> tuple[list[int], str]:
+    anchors = default_primary_anchor_indices(df)
+    if "_extra_doubledrug" not in task_name or "test" not in df.columns or "test_label" not in df.columns:
+        return anchors, "primary non-control anchors"
+
+    test_raw = df["test"]
+    test_numeric = pd.to_numeric(test_raw, errors="coerce")
+    test_text = test_raw.astype("string").fillna("").str.strip().str.lower()
+    test_eval = test_numeric.eq(1) | test_text.isin({"true", "yes", "y"})
+    labels = df["test_label"].astype("string").fillna("").str.strip()
+    eval_mask = test_eval & labels.ne("") & labels.str.lower().ne("delete")
+    return [int(idx) for idx in anchors if bool(eval_mask.iloc[int(idx)])], (
+        "primary non-control anchors with test == 1 and test_label != delete"
+    )
 
 
 def validate_double_drug_unordered_pair_leakage(
