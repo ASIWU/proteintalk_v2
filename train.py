@@ -19,7 +19,7 @@ os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 import numpy as np
 import pytorch_lightning as pl
 import torch
-from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
+from pytorch_lightning.callbacks import EarlyStopping, LearningRateMonitor, ModelCheckpoint
 from pytorch_lightning.loggers import TensorBoardLogger
 from torch.utils.data import DataLoader, WeightedRandomSampler
 
@@ -1199,6 +1199,74 @@ def build_fast_mse_gene_weights(
     }
 
 
+def build_fast_mse_target_weights(
+    *,
+    args: argparse.Namespace,
+    artifacts: FastTrainingReadyArtifacts,
+    train_indices: list[int],
+    pdi_matrix_path: Path,
+    ppi_matrix_path: Path,
+) -> tuple[np.ndarray | None, dict[str, Any]]:
+    mode = str(getattr(args, "mse_target_mode", "all")).lower()
+    if mode == "all":
+        return None, {"mode": "all", "enabled": False}
+    if mode not in {"pdi", "pdi_ppi", "topvar_pdi"}:
+        raise ValueError(f"unsupported mse_target_mode={mode!r}")
+
+    target_args = argparse.Namespace(**vars(args))
+    target_args.target_expression_mode = "pdi_ppi" if mode == "pdi_ppi" else "pdi"
+    target_args.target_expression_topk = int(getattr(args, "mse_target_topk", 512))
+    target_args.target_expression_ppi_topk = int(getattr(args, "mse_target_ppi_topk", 32))
+    target_args.target_expression_ppi_alpha = float(getattr(args, "mse_target_ppi_alpha", 0.5))
+    target_args.target_expression_ppi_norm = str(getattr(args, "mse_target_ppi_norm", "raw"))
+    target_args.target_expression_degree_penalty = float(getattr(args, "mse_target_degree_penalty", 0.0))
+    target_args.target_expression_chunk_size = int(getattr(args, "mse_target_chunk_size", 64))
+    target_args.target_expression_cache_dir = (
+        str(getattr(args, "mse_target_cache_dir", "") or getattr(args, "target_expression_cache_dir", "") or args.graph_cache_dir)
+    )
+    target_args.force_target_expression_cache_rebuild = bool(getattr(args, "force_mse_target_cache_rebuild", False))
+    matrix, summary = build_fast_target_expression_weights(
+        args=target_args,
+        artifacts=artifacts,
+        pdi_matrix_path=pdi_matrix_path,
+        ppi_matrix_path=ppi_matrix_path,
+        cache_task_name=f"{args.task_name}_mse_target",
+    )
+    if matrix is None:
+        return None, {"mode": mode, "enabled": False}
+
+    summary = dict(summary)
+    summary["mode"] = mode
+    summary["enabled"] = True
+    summary["source"] = "mse_target"
+    if mode != "topvar_pdi":
+        return matrix, summary
+
+    matrix_array = np.asarray(matrix, dtype=np.float32)
+    n_genes = int(matrix_array.shape[1])
+    variance_topk = min(max(1, int(getattr(args, "mse_target_variance_topk", 4096))), n_genes)
+    train_matrix = np.asarray(artifacts.expression_matrix[np.asarray(train_indices, dtype=np.int64)], dtype=np.float32)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        variance = np.nanvar(train_matrix, axis=0)
+    variance = np.nan_to_num(variance, nan=-np.inf, posinf=-np.inf, neginf=-np.inf)
+    top_indices = np.argpartition(-variance, kth=variance_topk - 1)[:variance_topk]
+    gene_scale = np.ones(n_genes, dtype=np.float32)
+    gene_scale[top_indices] = float(getattr(args, "mse_target_variance_scale", 2.0))
+    weighted = matrix_array * gene_scale.reshape(1, -1)
+    row_sum = weighted.sum(axis=1, keepdims=True)
+    weighted = np.divide(
+        weighted,
+        np.clip(row_sum, a_min=1e-8, a_max=None),
+        out=np.zeros_like(weighted),
+        where=row_sum > 0.0,
+    )
+    summary["variance_topk"] = int(variance_topk)
+    summary["variance_scale"] = float(getattr(args, "mse_target_variance_scale", 2.0))
+    summary["variance_selected_count"] = int(top_indices.shape[0])
+    return weighted.astype(np.float16, copy=False), summary
+
+
 def resolve_fast_positive_weight(
     args: argparse.Namespace,
     artifacts: FastTrainingReadyArtifacts,
@@ -1334,6 +1402,13 @@ def run_fast_training(args: argparse.Namespace) -> None:
         train_indices=train_indices,
         pdi_matrix_path=pdi_matrix_path,
     )
+    mse_target_weight_matrix, mse_target_weight_summary = build_fast_mse_target_weights(
+        args=args,
+        artifacts=artifacts,
+        train_indices=train_indices,
+        pdi_matrix_path=pdi_matrix_path,
+        ppi_matrix_path=ppi_matrix_path,
+    )
     target_expression_weight_matrix, target_expression_summary = build_fast_target_expression_weights(
         args=args,
         artifacts=artifacts,
@@ -1389,6 +1464,11 @@ def run_fast_training(args: argparse.Namespace) -> None:
         pair_logit_gate=args.pair_logit_gate,
         target_logit_scale=args.target_logit_scale,
         covariate_logit_scale=args.covariate_logit_scale,
+        response_delta_mode=args.response_delta_mode,
+        response_delta_dim=args.response_delta_dim,
+        response_delta_seed=args.response_delta_seed,
+        response_delta_detach=args.response_delta_detach,
+        delta_logit_scale=args.delta_logit_scale,
         aux_covariate_sizes=aux_covariate_sizes,
         prior_feature_dim=prior_feature_dim,
         prior_logit_scale=args.cell_prior_logit_scale,
@@ -1414,6 +1494,10 @@ def run_fast_training(args: argparse.Namespace) -> None:
         max_epochs=args.max_epochs,
         mse_gene_subsample=args.mse_gene_subsample,
         mse_gene_weights=mse_gene_weights,
+        mse_target_weight_matrix=mse_target_weight_matrix,
+        mse_weight_schedule=args.mse_weight_schedule,
+        mse_decay_start_epoch_frac=args.mse_decay_start_epoch_frac,
+        mse_final_weight_multiplier=args.mse_final_weight_multiplier,
         label_smoothing=args.label_smoothing,
         aux_covariate_loss_weight=args.aux_covariate_loss_weight,
         aux_covariate_indices=aux_covariate_indices,
@@ -1443,8 +1527,12 @@ def run_fast_training(args: argparse.Namespace) -> None:
         "ordered_protein_index_path": str((task_dir / "feature_ordered_protein_index.json").resolve()),
         "protein_embedding_path": str(protein_embedding_path.resolve()),
         "drug_embedding_path": str(drug_embedding_path.resolve()),
-        "ppi_matrix_path": str(ppi_matrix_path.resolve()) if args.graph_feature_mode in {"real", "zero"} else None,
-        "pdi_matrix_path": str(pdi_matrix_path.resolve()) if args.graph_feature_mode in {"real", "zero"} else None,
+        "ppi_matrix_path": str(ppi_matrix_path.resolve())
+        if (args.graph_feature_mode in {"real", "zero"} or args.target_expression_mode == "pdi_ppi" or args.mse_target_mode == "pdi_ppi")
+        else None,
+        "pdi_matrix_path": str(pdi_matrix_path.resolve())
+        if (args.graph_feature_mode in {"real", "zero"} or args.target_expression_mode != "off" or args.mse_target_mode != "all")
+        else None,
         "ddi_matrix_path": str(ddi_matrix_path.resolve()) if (args.use_ddi or args.graph_feature_mode in {"real", "zero"}) else None,
         "graph_feature_mode": args.graph_feature_mode,
         "graph_feature_dim": args.graph_feature_dim,
@@ -1489,6 +1577,11 @@ def run_fast_training(args: argparse.Namespace) -> None:
         "pair_logit_gate": args.pair_logit_gate,
         "target_logit_scale": args.target_logit_scale,
         "covariate_logit_scale": args.covariate_logit_scale,
+        "response_delta_mode": args.response_delta_mode,
+        "response_delta_dim": args.response_delta_dim,
+        "response_delta_seed": args.response_delta_seed,
+        "response_delta_detach": args.response_delta_detach,
+        "delta_logit_scale": args.delta_logit_scale,
         "aux_covariate_loss_fields": list(args.aux_covariate_loss_fields),
         "aux_covariate_loss_indices": list(aux_covariate_indices),
         "aux_covariate_loss_weight": args.aux_covariate_loss_weight,
@@ -1508,6 +1601,16 @@ def run_fast_training(args: argparse.Namespace) -> None:
         "cell_prior_logit_scale": args.cell_prior_logit_scale,
         "cell_prior_fixed_logit_scale": args.cell_prior_fixed_logit_scale,
         "mse_gene_weight_summary": mse_gene_weight_summary,
+        "mse_target_mode": args.mse_target_mode,
+        "mse_target_topk": args.mse_target_topk,
+        "mse_target_ppi_topk": args.mse_target_ppi_topk,
+        "mse_target_ppi_alpha": args.mse_target_ppi_alpha,
+        "mse_target_ppi_norm": args.mse_target_ppi_norm,
+        "mse_target_degree_penalty": args.mse_target_degree_penalty,
+        "mse_target_summary": json_safe(mse_target_weight_summary),
+        "mse_weight_schedule": args.mse_weight_schedule,
+        "mse_decay_start_epoch_frac": args.mse_decay_start_epoch_frac,
+        "mse_final_weight_multiplier": args.mse_final_weight_multiplier,
         "effective_key1": args.effective_key1,
         "effective_key2": args.effective_key2,
         "task_head": task_loss_config["task_head"],
@@ -1625,6 +1728,16 @@ def run_fast_training(args: argparse.Namespace) -> None:
         callbacks.append(checkpoint_callback)
     if monitor and not args.allow_nonfinite_monitor:
         callbacks.append(MonitorMetricGuard(monitor))
+    if args.early_stopping_patience is not None and monitor:
+        callbacks.append(
+            EarlyStopping(
+                monitor=monitor,
+                mode=monitor_mode,
+                patience=args.early_stopping_patience,
+                min_delta=args.early_stopping_min_delta,
+                strict=not args.allow_nonfinite_monitor,
+            )
+        )
     logger = build_logger(args, experiment_name)
     if logger is not False:
         callbacks.append(LearningRateMonitor(logging_interval="epoch"))
@@ -1687,10 +1800,10 @@ def main() -> None:
     parser.add_argument("--experiment-name", default=None)
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--max-epochs", type=int, default=50)
-    parser.add_argument("--learning-rate", type=float, default=3e-4)
-    parser.add_argument("--hidden-dim", type=int, default=384)
-    parser.add_argument("--expression-latent-dim", type=int, default=512)
-    parser.add_argument("--covariate-embedding-dim", type=int, default=64)
+    parser.add_argument("--learning-rate", type=float, default=2e-4)
+    parser.add_argument("--hidden-dim", type=int, default=512)
+    parser.add_argument("--expression-latent-dim", type=int, default=768)
+    parser.add_argument("--covariate-embedding-dim", type=int, default=96)
     parser.add_argument("--num-heads", type=int, default=8)
     parser.add_argument("--num-layers", type=int, default=4)
     parser.add_argument("--dropout", type=float, default=0.15)
@@ -1717,6 +1830,25 @@ def main() -> None:
     )
     parser.add_argument("--mse-gene-weight-topk", type=int, default=4096)
     parser.add_argument("--mse-gene-weight-scale", type=float, default=2.0)
+    parser.add_argument(
+        "--mse-target-mode",
+        choices=["all", "pdi", "pdi_ppi", "topvar_pdi"],
+        default="all",
+        help="Use drug-specific PDI/PPI target proteins instead of all genes for the reconstruction MSE.",
+    )
+    parser.add_argument("--mse-target-topk", type=int, default=512)
+    parser.add_argument("--mse-target-ppi-topk", type=int, default=32)
+    parser.add_argument("--mse-target-ppi-alpha", type=float, default=0.5)
+    parser.add_argument("--mse-target-ppi-norm", choices=["raw", "row", "symmetric"], default="raw")
+    parser.add_argument("--mse-target-degree-penalty", type=float, default=0.0)
+    parser.add_argument("--mse-target-chunk-size", type=int, default=64)
+    parser.add_argument("--mse-target-cache-dir", default="")
+    parser.add_argument("--force-mse-target-cache-rebuild", action="store_true")
+    parser.add_argument("--mse-target-variance-topk", type=int, default=4096)
+    parser.add_argument("--mse-target-variance-scale", type=float, default=2.0)
+    parser.add_argument("--mse-weight-schedule", choices=["constant", "warmup_decay"], default="constant")
+    parser.add_argument("--mse-decay-start-epoch-frac", type=float, default=0.4)
+    parser.add_argument("--mse-final-weight-multiplier", type=float, default=1.0)
     parser.add_argument(
         "--active-label-sampling-weight",
         type=float,
@@ -1879,6 +2011,11 @@ def main() -> None:
     parser.add_argument("--pair-logit-gate", action="store_true")
     parser.add_argument("--target-logit-scale", type=float, default=0.0)
     parser.add_argument("--covariate-logit-scale", type=float, default=0.0)
+    parser.add_argument("--response-delta-mode", choices=["off", "summary", "gate"], default="off")
+    parser.add_argument("--response-delta-dim", type=int, default=64)
+    parser.add_argument("--response-delta-seed", type=int, default=31)
+    parser.add_argument("--response-delta-detach", action="store_true")
+    parser.add_argument("--delta-logit-scale", type=float, default=0.0)
     parser.add_argument(
         "--aux-covariate-loss-fields",
         nargs="*",
@@ -1935,6 +2072,13 @@ def main() -> None:
         help="Raw Lightning metric override for ModelCheckpoint; use only when --best-ckpt-metric is insufficient.",
     )
     parser.add_argument("--monitor-mode", choices=["min", "max"], default=None)
+    parser.add_argument(
+        "--early-stopping-patience",
+        type=int,
+        default=None,
+        help="Enable Lightning EarlyStopping on the selected monitor when set.",
+    )
+    parser.add_argument("--early-stopping-min-delta", type=float, default=0.0)
     parser.add_argument("--logger-backend", choices=["tensorboard", "wandb", "both", "none"], default="wandb")
     parser.add_argument("--log-to-wandb", "--log_to_wandb", action="store_true", dest="log_to_wandb")
     parser.add_argument("--wandb-project", default="aivc_proteintalk")
@@ -2208,6 +2352,16 @@ def main() -> None:
     ]
     if monitor and not args.allow_nonfinite_monitor:
         callbacks.append(MonitorMetricGuard(monitor))
+    if args.early_stopping_patience is not None and monitor:
+        callbacks.append(
+            EarlyStopping(
+                monitor=monitor,
+                mode=monitor_mode,
+                patience=args.early_stopping_patience,
+                min_delta=args.early_stopping_min_delta,
+                strict=not args.allow_nonfinite_monitor,
+            )
+        )
     if logger is not False:
         callbacks.append(LearningRateMonitor(logging_interval="epoch"))
     if args.unfreeze_at_epoch is not None:

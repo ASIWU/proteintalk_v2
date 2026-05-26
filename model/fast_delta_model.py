@@ -89,9 +89,9 @@ class FastDeltaDrugResponseModel(nn.Module):
         protein_embedding: np.ndarray,
         ordered_protein_index: list[int] | None = None,
         covariate_sizes: list[int],
-        hidden_dim: int = 384,
-        expression_latent_dim: int = 512,
-        covariate_embedding_dim: int = 64,
+        hidden_dim: int = 512,
+        expression_latent_dim: int = 768,
+        covariate_embedding_dim: int = 96,
         dropout: float = 0.15,
         control_layers: int = 2,
         fusion_layers: int = 3,
@@ -130,6 +130,11 @@ class FastDeltaDrugResponseModel(nn.Module):
         pair_logit_gate: bool = False,
         target_logit_scale: float = 0.0,
         covariate_logit_scale: float = 0.0,
+        response_delta_mode: str = "off",
+        response_delta_dim: int = 64,
+        response_delta_seed: int = 31,
+        response_delta_detach: bool = False,
+        delta_logit_scale: float = 0.0,
         aux_covariate_sizes: list[int] | None = None,
         prior_feature_dim: int = 0,
         prior_logit_scale: float = 0.0,
@@ -196,6 +201,18 @@ class FastDeltaDrugResponseModel(nn.Module):
         self.pair_logit_gate_enabled = bool(pair_logit_gate)
         self.target_logit_scale = float(target_logit_scale)
         self.covariate_logit_scale = float(covariate_logit_scale)
+        self.response_delta_mode = str(response_delta_mode).lower()
+        if self.response_delta_mode not in {"off", "summary", "gate"}:
+            raise ValueError("response_delta_mode must be off, summary, or gate")
+        self.response_delta_dim = int(response_delta_dim)
+        if self.response_delta_mode != "off" and self.response_delta_dim <= 0:
+            raise ValueError("response_delta_dim must be positive when response_delta_mode is enabled")
+        self.response_delta_detach = bool(response_delta_detach)
+        self.delta_logit_scale = float(delta_logit_scale)
+        if self.delta_logit_scale < 0.0:
+            raise ValueError("delta_logit_scale must be non-negative")
+        if self.response_delta_mode == "off" and self.delta_logit_scale:
+            raise ValueError("delta_logit_scale requires response_delta_mode to be summary or gate")
         self.prior_feature_dim = int(prior_feature_dim)
         self.prior_logit_scale = float(prior_logit_scale)
         self.prior_fixed_logit_scale = float(prior_fixed_logit_scale)
@@ -486,6 +503,47 @@ class FastDeltaDrugResponseModel(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(head_hidden, 1),
         )
+        if self.response_delta_mode != "off":
+            response_delta_projection = _random_projection(
+                self.n_genes,
+                self.response_delta_dim,
+                seed=response_delta_seed,
+            )
+            self.register_buffer(
+                "response_delta_projection",
+                torch.tensor(response_delta_projection, dtype=torch.float32),
+                persistent=False,
+            )
+            self.response_delta_encoder = make_mlp(
+                self.response_delta_dim,
+                hidden_dim,
+                hidden_dim,
+                dropout=dropout,
+                layers=2,
+            )
+            self.delta_response_head, self.delta_synergy_head = self._make_aux_logit_heads(
+                hidden_dim,
+                head_hidden,
+                dropout,
+                self.delta_logit_scale,
+            )
+            self.delta_logit_gate_head = (
+                nn.Sequential(
+                    nn.LayerNorm(hidden_dim),
+                    nn.Linear(hidden_dim, head_hidden),
+                    nn.GELU(),
+                    nn.Dropout(dropout),
+                    nn.Linear(head_hidden, 1),
+                )
+                if self.delta_logit_scale and self.response_delta_mode == "gate"
+                else None
+            )
+        else:
+            self.register_buffer("response_delta_projection", torch.empty(0), persistent=False)
+            self.response_delta_encoder = None
+            self.delta_response_head = None
+            self.delta_synergy_head = None
+            self.delta_logit_gate_head = None
         self.control_response_head, self.control_synergy_head = self._make_aux_logit_heads(
             hidden_dim,
             head_hidden,
@@ -633,8 +691,18 @@ class FastDeltaDrugResponseModel(nn.Module):
             expression_pred = control_expression + self.delta_scale * delta
         else:
             expression_pred = delta
+        delta_hidden = None
+        if self.response_delta_mode != "off":
+            delta_signal = expression_pred - control_expression if self.residual_expression else expression_pred
+            delta_hidden = self._encode_response_delta(delta_signal)
         response_logits = self.response_head(hidden)
         synergy_logits = self.synergy_head(hidden)
+        response_logits, synergy_logits = self._add_delta_logits(
+            response_logits,
+            synergy_logits,
+            delta_hidden,
+            hidden,
+        )
         response_logits, synergy_logits = self._add_aux_logits(
             response_logits,
             synergy_logits,
@@ -743,6 +811,36 @@ class FastDeltaDrugResponseModel(nn.Module):
         return (
             response_logits + scale * gate * self.pair_response_head(pair_hidden),
             synergy_logits + scale * gate * self.pair_synergy_head(pair_hidden),
+        )
+
+    def _encode_response_delta(self, delta_signal: torch.Tensor) -> torch.Tensor:
+        if self.response_delta_encoder is None or self.response_delta_projection.numel() == 0:
+            raise RuntimeError("response delta encoder was not initialized")
+        delta_signal = torch.nan_to_num(delta_signal.float(), nan=0.0, posinf=0.0, neginf=0.0)
+        if self.response_delta_detach:
+            delta_signal = delta_signal.detach()
+        projection = self.response_delta_projection.to(device=delta_signal.device, dtype=delta_signal.dtype)
+        projected = delta_signal @ projection
+        return self.response_delta_encoder(projected)
+
+    def _add_delta_logits(
+        self,
+        response_logits: torch.Tensor,
+        synergy_logits: torch.Tensor,
+        delta_hidden: torch.Tensor | None,
+        fusion_hidden: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if not self.delta_logit_scale:
+            return response_logits, synergy_logits
+        if delta_hidden is None or self.delta_response_head is None or self.delta_synergy_head is None:
+            raise RuntimeError("delta logit heads were not initialized")
+        gate = 1.0
+        if self.delta_logit_gate_head is not None:
+            gate = torch.sigmoid(self.delta_logit_gate_head(fusion_hidden))
+        scale = float(self.delta_logit_scale)
+        return (
+            response_logits + scale * gate * self.delta_response_head(delta_hidden),
+            synergy_logits + scale * gate * self.delta_synergy_head(delta_hidden),
         )
 
     def _pair_encoder_input_dim(self, hidden_dim: int) -> int:

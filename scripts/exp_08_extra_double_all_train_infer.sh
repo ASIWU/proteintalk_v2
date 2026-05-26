@@ -67,6 +67,13 @@ if [[ "${RUN_INFERENCE}" == "1" ]]; then
     ptv3_extra_doubledrug_guomics; do
     ptv3_infer "${all_single_double_ckpt}" "${task_name}" synergy "${all_single_double_exp}"
   done
+
+  "${PYTHON_BIN}" scripts/report_extra_doubledrug_test_label_auprc.py \
+    "${OUTPUT_DIR}/${all_single_double_exp}" \
+    --allow-partial \
+    --csv-out "${OUTPUT_DIR}/${all_single_double_exp}/extra_doubledrug_test_label_auprc.csv" \
+    --json-out "${OUTPUT_DIR}/${all_single_double_exp}/extra_doubledrug_test_label_auprc.json" \
+    --format markdown
 fi
 
 ptv3_done

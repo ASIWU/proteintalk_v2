@@ -102,7 +102,9 @@ FOLDS="0 1 2 3 4" \
 MAX_EPOCHS=100 \
 LEARNING_RATE=5e-5 \
 BATCH_SIZE=8 \
-HIDDEN_DIM=384 \
+HIDDEN_DIM=512 \
+EXPRESSION_LATENT_DIM=768 \
+COVARIATE_EMBEDDING_DIM=96 \
 NUM_HEADS=8 \
 NUM_LAYERS=6 \
 DROPOUT=0.2 \
@@ -152,11 +154,11 @@ logs/${EXP_PREFIX}_runtime_summary.tsv
 
 | Variable | Default | Passed to `train.py` | Notes |
 |---|---:|---|---|
-| `BATCH_SIZE` | `16` | `--batch-size` | Per-GPU batch size. Effective global batch is roughly `BATCH_SIZE * DEVICES`. |
+| `BATCH_SIZE` | `256` | `--batch-size` | Per-GPU batch size. Effective global batch is roughly `BATCH_SIZE * DEVICES`. |
 | `MAX_EPOCHS` | `50` | `--max-epochs` | Training epochs per fold. |
-| `LEARNING_RATE` | `1e-4` | `--learning-rate` | Base optimizer learning rate. |
+| `LEARNING_RATE` | `2e-4` | `--learning-rate` | Base optimizer learning rate. |
 | `OPTIMIZER_NAME` | `adamw` | `--optimizer-name` | Supported: `adam`, `sgd`, `adamw`, `adamw_fused`, `adamw_fused_<multiplier>`. |
-| `SCHEDULER_NAME` | empty | `--scheduler-name` | Optional: `cosine`, `step`, `plateau`, `cosine_warmup`. Empty means no scheduler. |
+| `SCHEDULER_NAME` | `cosine` | `--scheduler-name` | Optional: `cosine`, `step`, `plateau`, `cosine_warmup`. Empty means no scheduler. |
 | `GRADIENT_CLIP_VAL` | `1.0` | `--gradient-clip-val` | Lightning gradient clipping value. |
 | `LOG_EVERY_N_STEPS` | `1` | `--log-every-n-steps` | Trainer logging interval. Use `1` for every optimizer step in wandb/TensorBoard. |
 | `CHECK_VAL_EVERY_N_EPOCH` | `1` | `--check-val-every-n-epoch` | Validation frequency in epochs. |
@@ -199,16 +201,20 @@ optimizer steps per epoch; `LOG_EVERY_N_STEPS=1` records every step.
 
 | Variable | Default | Passed to `train.py` | Notes |
 |---|---:|---|---|
-| `HIDDEN_DIM` | `256` | `--hidden-dim` | Main transformer hidden dimension. |
+| `HIDDEN_DIM` | `512` | `--hidden-dim` | Main transformer hidden dimension. |
+| `EXPRESSION_LATENT_DIM` | `768` | `--expression-latent-dim` | Expression reconstruction latent dimension. |
+| `COVARIATE_EMBEDDING_DIM` | `96` | `--covariate-embedding-dim` | Per-covariate embedding dimension. |
 | `NUM_HEADS` | `8` | `--num-heads` | Attention heads. Keep `HIDDEN_DIM` divisible by `NUM_HEADS`. |
 | `NUM_LAYERS` | `4` | `--num-layers` | Transformer layer count. |
-| `DROPOUT` | `0.1` | `--dropout` | Dropout probability. |
+| `DROPOUT` | `0.15` | `--dropout` | Dropout probability. |
 
 Example:
 
 ```bash
 EXP_PREFIX=20260510_deeper \
-HIDDEN_DIM=384 \
+HIDDEN_DIM=512 \
+EXPRESSION_LATENT_DIM=768 \
+COVARIATE_EMBEDDING_DIM=96 \
 NUM_HEADS=8 \
 NUM_LAYERS=6 \
 DROPOUT=0.2 \
@@ -256,10 +262,10 @@ bash scripts/exp_06_double_pert_pair_5fold.sh
 | Variable | Default | Meaning |
 |---|---:|---|
 | `GPU_IDS` | `0,1,2,3,4,5,6,7` | Value assigned to `CUDA_VISIBLE_DEVICES` |
-| `DEVICES` | `8` | Lightning `--devices`; keep this equal to the number of visible GPUs for DDP |
-| `PRECISION` | `32-true` | Lightning precision string |
-| `NUM_WORKERS` | `0` | DataLoader workers |
-| `INFER_BATCH_SIZE` | `16` | Inference batch size for scripts 07/08 |
+| `DEVICES` | `1` | Lightning `--devices`; the parallel launcher assigns one process per visible GPU |
+| `PRECISION` | `bf16-mixed` | Lightning precision string |
+| `NUM_WORKERS` | `4` | DataLoader workers |
+| `INFER_BATCH_SIZE` | `256` | Inference batch size for scripts 07/08 |
 | `INFER_DEVICE` | `cuda:0` | Device passed to `infer.py` |
 | `INFER_LIMIT_BATCHES` | empty | Optional inference batch limit |
 
@@ -379,8 +385,8 @@ bash scripts/exp_01_single_pert_stratified_5fold.sh
 
 | Variable | Default | Meaning |
 |---|---:|---|
-| `LOGGER_BACKEND` | `tensorboard` | `tensorboard`, `wandb`, `both`, or `none` |
-| `LOG_TO_WANDB` | `0` | Legacy switch; if `1`, uses wandb even if `LOGGER_BACKEND` differs |
+| `LOGGER_BACKEND` | `wandb` | `tensorboard`, `wandb`, `both`, or `none` |
+| `LOG_TO_WANDB` | `1` | Legacy switch; if `1`, uses wandb even if `LOGGER_BACKEND` differs |
 | `WANDB_PROJECT` | `aivc_proteintalk` | wandb project name |
 | `WANDB_ENTITY` | empty | optional wandb entity |
 | `WANDB_GROUP` | empty | optional wandb group |

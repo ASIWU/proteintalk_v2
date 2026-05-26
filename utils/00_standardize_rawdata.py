@@ -41,6 +41,7 @@ import pandas as pd
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RAW_ROOT = REPO_ROOT / "data" / "rawdata"
+EXTRA_DOUBLE_UPDATE_ROOT = RAW_ROOT / "update_0526" / "extra_doubledrug"
 DEFAULT_OUTPUT_ROOT = REPO_ROOT / "data" / "standardized"
 
 STANDARD_INFO_COLUMNS = [
@@ -1592,24 +1593,27 @@ def standardize_extra_double_task(
 ) -> TaskResult:
     if file_kind == "guomics":
         info_path = resolve_existing_path(
+            EXTRA_DOUBLE_UPDATE_ROOT / file_name,
             RAW_ROOT / "extra_doubeldrug" / "260423ptv3_Guomics_drug_combo_unique_with_smlies.csv",
             RAW_ROOT / "extra_doubeldrug" / "260417ptv3_Guomics_drug_combo_unique_with_smlies.csv",
             RAW_ROOT / "extra_doubeldrug" / "20260410ptv3_Guomics_drug_combo_vali_unique.csv",
         )
     elif file_kind == "nc":
         info_path = resolve_existing_path(
-            RAW_ROOT / "extra_doubeldrug" / "260424nc_drugComb_info_unique_with_smiles.csv",
+            EXTRA_DOUBLE_UPDATE_ROOT / file_name,
             RAW_ROOT / "extra_doubeldrug" / file_name,
+            RAW_ROOT / "extra_doubeldrug" / "260424nc_drugComb_info_unique_with_smiles.csv",
             RAW_ROOT / "extra_doubeldrug" / "20260411NC_combo_info_unique.csv",
         )
     elif file_kind == "nature":
         info_path = resolve_existing_path(
-            RAW_ROOT / "extra_doubeldrug" / "260424nature_drugComb_info_unique_with_smiles.csv",
+            EXTRA_DOUBLE_UPDATE_ROOT / file_name,
             RAW_ROOT / "extra_doubeldrug" / file_name,
+            RAW_ROOT / "extra_doubeldrug" / "260424nature_drugComb_info_unique_with_smiles.csv",
             RAW_ROOT / "extra_doubeldrug" / "20260411nature_drugComb_info_unique.csv",
         )
     else:
-        info_path = RAW_ROOT / "extra_doubeldrug" / file_name
+        info_path = resolve_existing_path(EXTRA_DOUBLE_UPDATE_ROOT / file_name, RAW_ROOT / "extra_doubeldrug" / file_name)
     raw = pd.read_csv(info_path, low_memory=False)
 
     if file_kind == "guomics":
@@ -1740,6 +1744,10 @@ def standardize_extra_double_task(
     standard["target_protein_list"] = [merged_targets_for_double(a, b) for a, b in zip(target1_lists, target2_lists)]
     standard["control"] = ""
     standard["synergy"] = clean_nullable_string(raw["synergy"])
+    if "test" in raw.columns:
+        standard["test"] = pd.to_numeric(raw["test"], errors="coerce")
+    if "test_label" in raw.columns:
+        standard["test_label"] = clean_nullable_string(raw["test_label"])
 
     standard["smiles1"] = smiles1
     standard["smiles2"] = smiles2
@@ -1828,6 +1836,8 @@ def standardize_extra_double_task(
             "drugname": f"{name_columns_1[0]} || {name_columns_2[0]}",
             "smiles": "Smiles*_with_chiral > smiles* > Smiles*_no_chiral",
             "control": "matched from ptv3 control pool",
+            "test": "raw extra double-drug evaluation flag when present; test=0 rows are retained for audit but excluded from evaluation splits",
+            "test_label": "raw extra double-drug evaluation group label when present",
         },
         "special_rules": [
             "this task has no raw perturbation proteome matrix in the checkout, so an empty expression structure is emitted",
@@ -2510,9 +2520,9 @@ def main() -> None:
         task_results.append(task_result)
 
     extra_double_specs = [
-        ("ptv3_extra_doubledrug_guomics", "260423ptv3_Guomics_drug_combo_unique_with_smlies.csv", "guomics"),
-        ("ptv3_extra_doubledrug_nc", "260424nc_drugComb_info_unique_with_smiles.csv", "nc"),
-        ("ptv3_extra_doubledrug_nature", "260424nature_drugComb_info_unique_with_smiles.csv", "nature"),
+        ("ptv3_extra_doubledrug_guomics", "260525ptv3_Guomics_drug_combo_unique_with_smlies_test_label.csv", "guomics"),
+        ("ptv3_extra_doubledrug_nc", "260525nc_drugComb_info_unique_with_smiles_test_label.csv", "nc"),
+        ("ptv3_extra_doubledrug_nature", "260525nature_drugComb_info_unique_with_smiles_test_label.csv", "nature"),
     ]
     for task_name, file_name, file_kind in extra_double_specs:
         task_dir = ensure_dir(ptv3_tasks_root / task_name)

@@ -21,14 +21,32 @@ def binary_metrics(y_true: np.ndarray, y_prob: np.ndarray, mask: np.ndarray | No
         y_true = y_true[keep]
         y_prob = y_prob[keep]
     if y_true.size == 0:
-        return {"auroc": float("nan"), "auprc": float("nan"), "acc": float("nan"), "count": 0.0}
+        return {
+            "auroc": float("nan"),
+            "auprc": float("nan"),
+            "auprc_baseline": float("nan"),
+            "nauprc": float("nan"),
+            "acc": float("nan"),
+            "count": 0.0,
+        }
     y_hat = (y_prob >= 0.5).astype(np.float64)
     acc = float((y_hat == y_true).mean())
+    baseline = float(np.mean(y_true == 1))
     if np.unique(y_true).size < 2:
-        return {"auroc": float("nan"), "auprc": float("nan"), "acc": acc, "count": float(y_true.size)}
+        return {
+            "auroc": float("nan"),
+            "auprc": float("nan"),
+            "auprc_baseline": baseline,
+            "nauprc": float("nan"),
+            "acc": acc,
+            "count": float(y_true.size),
+        }
+    auprc = float(average_precision_score(y_true, y_prob))
     return {
         "auroc": float(roc_auc_score(y_true, y_prob)),
-        "auprc": float(average_precision_score(y_true, y_prob)),
+        "auprc": auprc,
+        "auprc_baseline": baseline,
+        "nauprc": auprc / baseline if baseline > 0 else float("nan"),
         "acc": acc,
         "count": float(y_true.size),
     }
@@ -52,6 +70,10 @@ class FastProteinTalkLightning(pl.LightningModule):
         max_epochs: int = 50,
         mse_gene_subsample: int = 0,
         mse_gene_weights: torch.Tensor | None = None,
+        mse_target_weight_matrix: np.ndarray | torch.Tensor | None = None,
+        mse_weight_schedule: str = "constant",
+        mse_decay_start_epoch_frac: float = 0.4,
+        mse_final_weight_multiplier: float = 1.0,
         label_smoothing: float = 0.0,
         aux_covariate_loss_weight: float = 0.0,
         aux_covariate_indices: list[int] | None = None,
@@ -83,6 +105,16 @@ class FastProteinTalkLightning(pl.LightningModule):
         if mse_gene_weights is None:
             mse_gene_weights = torch.empty(0, dtype=torch.float32)
         self.register_buffer("mse_gene_weights", mse_gene_weights.float(), persistent=False)
+        self._init_mse_target_weights(mse_target_weight_matrix)
+        self.mse_weight_schedule = str(mse_weight_schedule).lower()
+        if self.mse_weight_schedule not in {"constant", "warmup_decay"}:
+            raise ValueError("mse_weight_schedule must be constant or warmup_decay")
+        self.mse_decay_start_epoch_frac = float(mse_decay_start_epoch_frac)
+        if not 0.0 <= self.mse_decay_start_epoch_frac <= 1.0:
+            raise ValueError("mse_decay_start_epoch_frac must be in [0, 1]")
+        self.mse_final_weight_multiplier = float(mse_final_weight_multiplier)
+        if self.mse_final_weight_multiplier < 0.0:
+            raise ValueError("mse_final_weight_multiplier must be non-negative")
         self.label_smoothing = float(label_smoothing)
         if not 0.0 <= self.label_smoothing < 1.0:
             raise ValueError("label_smoothing must be in [0, 1)")
@@ -109,10 +141,57 @@ class FastProteinTalkLightning(pl.LightningModule):
         self.register_buffer("positive_weight", torch.tensor(pos_weight_value, dtype=torch.float32))
         self.validation_outputs: list[dict[str, torch.Tensor]] = []
         self.test_outputs: list[dict[str, torch.Tensor]] = []
-        self.save_hyperparameters(ignore=["model"])
+        self.save_hyperparameters(ignore=["model", "mse_gene_weights", "mse_target_weight_matrix"])
 
     def forward(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         return self.model(batch)
+
+    def _init_mse_target_weights(self, weight_matrix: np.ndarray | torch.Tensor | None) -> None:
+        self.mse_target_enabled = weight_matrix is not None
+        if weight_matrix is None:
+            self.mse_target_drug_count = 0
+            self.register_buffer("mse_target_indices", torch.empty(0, dtype=torch.long), persistent=False)
+            self.register_buffer("mse_target_values", torch.empty(0), persistent=False)
+            self.register_buffer("mse_target_dense_weights", torch.empty(0), persistent=False)
+            return
+
+        matrix = np.asarray(weight_matrix, dtype=np.float32)
+        if matrix.ndim != 2:
+            raise ValueError(f"mse_target_weight_matrix must be 2D; got {matrix.shape}")
+        matrix = np.nan_to_num(matrix, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32, copy=False)
+        matrix = np.clip(matrix, a_min=0.0, a_max=None)
+        self.mse_target_drug_count = int(matrix.shape[0])
+        positive_counts = np.count_nonzero(matrix > 0.0, axis=1)
+        max_positive_count = int(positive_counts.max(initial=0))
+        if max_positive_count == 0:
+            self.mse_target_enabled = False
+            self.register_buffer("mse_target_indices", torch.empty(0, dtype=torch.long), persistent=False)
+            self.register_buffer("mse_target_values", torch.empty(0), persistent=False)
+            self.register_buffer("mse_target_dense_weights", torch.empty(0), persistent=False)
+            return
+        if 0 < max_positive_count < matrix.shape[1]:
+            top_idx = np.argpartition(-matrix, kth=max_positive_count - 1, axis=1)[:, :max_positive_count]
+            top_values = np.take_along_axis(matrix, top_idx, axis=1)
+            top_values = np.where(top_values > 0.0, top_values, 0.0)
+            self.register_buffer(
+                "mse_target_indices",
+                torch.tensor(top_idx.astype(np.int64, copy=False), dtype=torch.long),
+                persistent=False,
+            )
+            self.register_buffer(
+                "mse_target_values",
+                torch.tensor(top_values.astype(np.float16, copy=False), dtype=torch.float16),
+                persistent=False,
+            )
+            self.register_buffer("mse_target_dense_weights", torch.empty(0), persistent=False)
+        else:
+            self.register_buffer(
+                "mse_target_dense_weights",
+                torch.tensor(matrix.astype(np.float16, copy=False), dtype=torch.float16),
+                persistent=False,
+            )
+            self.register_buffer("mse_target_indices", torch.empty(0, dtype=torch.long), persistent=False)
+            self.register_buffer("mse_target_values", torch.empty(0), persistent=False)
 
     def _active_label_and_mask(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor, str]:
         if self.task_head == "synergy":
@@ -139,7 +218,7 @@ class FastProteinTalkLightning(pl.LightningModule):
         aux_features = outputs[4] if len(outputs) > 4 else None
         expression_true = batch["perturb_expression"].float()
         label, mask, _ = self._active_label_and_mask(batch)
-        loss1 = self._mse_loss(expression_pred, expression_true, mask)
+        loss1 = self._mse_loss(expression_pred, expression_true, mask, drug_indices=batch.get("drug_indices"))
         task_logits = synergy_logits.squeeze(-1) if self.task_head == "synergy" else response_logits.squeeze(-1)
         inactive_logits = response_logits if self.task_head == "synergy" else synergy_logits
         loss2 = self._masked_bce(task_logits, label, mask)
@@ -148,7 +227,7 @@ class FastProteinTalkLightning(pl.LightningModule):
         ranking_loss = self._ranking_loss(task_logits, label, mask, batch)
         total = self.bce_weight * loss2
         if self.have_mse_loss:
-            total = total + self.mse_weight * loss1
+            total = total + self._effective_mse_weight() * loss1
         if self.aux_covariate_loss_weight > 0.0:
             total = total + self.aux_covariate_loss_weight * aux_loss
         if self.aux_covariate_contrastive_weight > 0.0:
@@ -227,35 +306,148 @@ class FastProteinTalkLightning(pl.LightningModule):
         per_anchor = -(log_prob.masked_fill(~positive, 0.0).sum(dim=1) / positive_count.clamp_min(1))
         return per_anchor[valid_anchor].mean()
 
+    def _effective_mse_weight(self) -> float:
+        if self.mse_weight_schedule == "constant" or self.max_epochs <= 1:
+            return float(self.mse_weight)
+        progress = float(self.current_epoch) / float(max(1, self.max_epochs - 1))
+        if progress <= self.mse_decay_start_epoch_frac:
+            multiplier = 1.0
+        else:
+            denom = max(1e-8, 1.0 - self.mse_decay_start_epoch_frac)
+            ratio = min(1.0, max(0.0, (progress - self.mse_decay_start_epoch_frac) / denom))
+            multiplier = 1.0 + ratio * (self.mse_final_weight_multiplier - 1.0)
+        return float(self.mse_weight) * float(multiplier)
+
     def _mse_loss(
         self,
         expression_pred: torch.Tensor,
         expression_true: torch.Tensor,
         active_label_mask: torch.Tensor | None = None,
+        drug_indices: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if not self.have_mse_loss:
             return expression_pred.new_tensor(0.0)
         pred = expression_pred
         true = expression_true
+        if self.mse_target_enabled and drug_indices is not None and self.mse_gene_subsample <= 0:
+            targeted_loss = self._mse_target_per_sample_loss(pred, true, drug_indices)
+            if targeted_loss is not None:
+                return self._finish_mse_per_sample_loss(targeted_loss, active_label_mask)
         if self.mse_gene_subsample > 0 and self.mse_gene_subsample < pred.shape[1] and self.training:
             index = torch.randperm(pred.shape[1], device=pred.device)[: self.mse_gene_subsample]
-            pred = pred[:, index]
-            true = true[:, index]
-            gene_weights = self._mse_gene_weights_for(pred.shape[1], pred.device, index=index)
+            per_sample_loss = self._full_mse_per_sample_loss(pred[:, index], true[:, index], gene_index=index)
         else:
-            gene_weights = self._mse_gene_weights_for(pred.shape[1], pred.device)
+            per_sample_loss = self._full_mse_per_sample_loss(pred, true)
+        if per_sample_loss is None:
+            return expression_pred.new_tensor(0.0)
+        return self._finish_mse_per_sample_loss(per_sample_loss, active_label_mask)
+
+    def _full_mse_per_sample_loss(
+        self,
+        pred: torch.Tensor,
+        true: torch.Tensor,
+        *,
+        gene_index: torch.Tensor | None = None,
+    ) -> torch.Tensor | None:
+        gene_weights = self._mse_gene_weights_for(pred.shape[1], pred.device, index=gene_index)
         valid = torch.isfinite(true)
         if not valid.any():
-            return expression_pred.new_tensor(0.0)
+            return None
         true_safe = torch.where(valid, true, torch.zeros_like(true))
         raw = (pred - true_safe).pow(2)
         valid_weight = valid.float()
         if gene_weights is not None:
             valid_weight = valid_weight * gene_weights.reshape(1, -1)
-        if self.mse_inactive_label_weight == 1.0 or active_label_mask is None:
-            return (raw * valid_weight).sum() / valid_weight.sum().clamp_min(1.0)
         per_sample_valid = valid_weight.sum(dim=1).clamp_min(1.0)
-        per_sample_loss = (raw * valid_weight).sum(dim=1) / per_sample_valid
+        return (raw * valid_weight).sum(dim=1) / per_sample_valid
+
+    def _mse_target_per_sample_loss(
+        self,
+        pred: torch.Tensor,
+        true: torch.Tensor,
+        drug_indices: torch.Tensor,
+    ) -> torch.Tensor | None:
+        if self.mse_target_indices.numel() > 0:
+            return self._sparse_mse_target_per_sample_loss(pred, true, drug_indices)
+        if self.mse_target_dense_weights.numel() > 0:
+            return self._dense_mse_target_per_sample_loss(pred, true, drug_indices)
+        return None
+
+    def _normalized_drug_indices(self, drug_indices: torch.Tensor, device: torch.device) -> torch.Tensor:
+        indices = drug_indices.to(device=device, dtype=torch.long)
+        if indices.ndim == 1:
+            indices = torch.stack([indices, indices], dim=1)
+        if indices.shape[1] == 1:
+            indices = indices.expand(-1, 2)
+        return indices[:, :2].clamp(min=0, max=max(0, self.mse_target_drug_count - 1))
+
+    def _sparse_mse_target_per_sample_loss(
+        self,
+        pred: torch.Tensor,
+        true: torch.Tensor,
+        drug_indices: torch.Tensor,
+    ) -> torch.Tensor | None:
+        indices = self._normalized_drug_indices(drug_indices, pred.device)
+        gene_indices = self.mse_target_indices[indices]
+        weights = self.mse_target_values[indices].to(device=pred.device, dtype=pred.dtype)
+        expanded_pred = pred.unsqueeze(1).expand(-1, 2, -1)
+        expanded_true = true.unsqueeze(1).expand(-1, 2, -1)
+        selected_pred = torch.gather(expanded_pred, dim=2, index=gene_indices)
+        selected_true = torch.gather(expanded_true, dim=2, index=gene_indices)
+        valid = torch.isfinite(selected_true) & (weights > 0.0)
+        if not valid.any():
+            return self._full_mse_per_sample_loss(pred, true)
+        selected_true = torch.where(valid, selected_true, torch.zeros_like(selected_true))
+        target_weight = weights * valid.to(weights.dtype)
+        gene_weights = self._mse_gene_weights_for(pred.shape[1], pred.device)
+        if gene_weights is not None:
+            target_weight = target_weight * gene_weights[gene_indices].to(target_weight.dtype)
+        raw = (selected_pred - selected_true).pow(2)
+        denom = target_weight.sum(dim=2)
+        slot_loss = (raw * target_weight).sum(dim=2) / denom.clamp_min(1e-8)
+        valid_slot = denom > 0.0
+        valid_count = valid_slot.sum(dim=1)
+        per_sample = (slot_loss * valid_slot.to(slot_loss.dtype)).sum(dim=1) / valid_count.clamp_min(1).to(slot_loss.dtype)
+        missing = valid_count == 0
+        if missing.any():
+            fallback = self._full_mse_per_sample_loss(pred, true)
+            if fallback is not None:
+                per_sample = torch.where(missing, fallback, per_sample)
+        return per_sample
+
+    def _dense_mse_target_per_sample_loss(
+        self,
+        pred: torch.Tensor,
+        true: torch.Tensor,
+        drug_indices: torch.Tensor,
+    ) -> torch.Tensor | None:
+        indices = self._normalized_drug_indices(drug_indices, pred.device)
+        target_weight = self.mse_target_dense_weights[indices].to(device=pred.device, dtype=pred.dtype).mean(dim=1)
+        valid = torch.isfinite(true) & (target_weight > 0.0)
+        if not valid.any():
+            return self._full_mse_per_sample_loss(pred, true)
+        true_safe = torch.where(valid, true, torch.zeros_like(true))
+        valid_weight = target_weight * valid.to(target_weight.dtype)
+        gene_weights = self._mse_gene_weights_for(pred.shape[1], pred.device)
+        if gene_weights is not None:
+            valid_weight = valid_weight * gene_weights.reshape(1, -1)
+        raw = (pred - true_safe).pow(2)
+        denom = valid_weight.sum(dim=1)
+        per_sample = (raw * valid_weight).sum(dim=1) / denom.clamp_min(1e-8)
+        missing = denom <= 0.0
+        if missing.any():
+            fallback = self._full_mse_per_sample_loss(pred, true)
+            if fallback is not None:
+                per_sample = torch.where(missing, fallback, per_sample)
+        return per_sample
+
+    def _finish_mse_per_sample_loss(
+        self,
+        per_sample_loss: torch.Tensor,
+        active_label_mask: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if self.mse_inactive_label_weight == 1.0 or active_label_mask is None:
+            return per_sample_loss.mean()
         active = (active_label_mask.reshape(-1) < 0.5).to(per_sample_loss.dtype)
         sample_weight = torch.where(
             active > 0.5,
@@ -333,6 +525,15 @@ class FastProteinTalkLightning(pl.LightningModule):
         self.log("train/total_loss", total, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
         self.log("train/loss1", loss1, on_step=True, on_epoch=True, prog_bar=False, sync_dist=True)
         self.log("train/loss2", loss2, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
+        if self.have_mse_loss:
+            self.log(
+                "train/effective_mse_weight",
+                self._metric_tensor(self._effective_mse_weight()),
+                on_step=False,
+                on_epoch=True,
+                prog_bar=False,
+                sync_dist=True,
+            )
         if self.aux_covariate_loss_weight > 0.0:
             self.log("train/aux_covariate_loss", aux_loss, on_step=True, on_epoch=True, prog_bar=False, sync_dist=True)
         if self.aux_covariate_contrastive_weight > 0.0:

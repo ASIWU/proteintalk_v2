@@ -1586,3 +1586,170 @@ python utils/01_validate_standardized_outputs.py
   - degree normalization and hub penalty are not useful for this artifact set; the raw PDI/PPI weights are stronger;
   - cell-aware magnitude gating gives a small fold0 gain, but it is not stable across folds and hurts fold2/fold4;
   - the recommended target-expression setting remains raw PDI/PPI `pair_add` without cell gate (`0.932174 / 0.773791`), while cell-aware gating is kept only as a negative/diagnostic ablation.
+
+## 2026-05-25 19:49 HKT MSE-Gap Architecture Exploration
+
+- Added default-off architecture/loss switches to test whether expression reconstruction can become a stronger auxiliary task:
+  - `--response-delta-mode {off,summary,gate}` with `--delta-logit-scale`, `--response-delta-dim`, and `--response-delta-detach`;
+  - `--mse-target-mode {all,pdi,pdi_ppi,topvar_pdi}` for reconstruction loss over drug-specific PDI/PPI target proteins;
+  - `--mse-weight-schedule {constant,warmup_decay}` with decay controls.
+- Added `scripts/run_mse_gap_delta_screen_2gpu.sh` for paired with-MSE / w/o-MSE screening on two GPUs. Defaults keep baseline4 unchanged.
+- Validation:
+  - `python -m py_compile train.py infer.py model/fast_delta_model.py model/fast_lightning.py` passed;
+  - `bash -n scripts/ptv3_experiment_common.sh scripts/run_mse_gap_delta_screen_2gpu.sh` passed;
+  - dry-run and 1-epoch smoke passed for delta-gated response with PDI target MSE.
+- Fold0/fold2 screening on `ptv3_main_singledrug / pert_stratified_5fold`, 1 GPU per run, batch size 256:
+  - `delta_summary_pdi`: average AUPRC gap `+0.0490`, close to the 5-point target in the initial screen;
+  - `delta_gate_pdi`: average AUPRC gap `+0.0245`;
+  - PDI/PPI schedule, top-variance PDI schedule, full-gene delta variants, low-dimensional delta variants, and target-only MSE variants were unstable or below target.
+- Full 5-fold confirmation for the best fold0/fold2 candidate `delta_summary_pdi`:
+  - with MSE: AUROC `0.902626`, AUPRC `0.654613`;
+  - w/o MSE: AUROC `0.898656`, AUPRC `0.650194`;
+  - gap: AUROC `+0.003970`, AUPRC `+0.004418`;
+  - baseline4 remains stronger: AUROC `0.903489`, AUPRC `0.666491`, baseline4 w/o-MSE AUPRC gap `+0.021950`.
+- Conclusion:
+  - the tested delta-response and target-MSE architectures are useful as ablation modules but should not replace baseline4;
+  - the fold0/fold2 MSE-gap gain did not generalize to 5-fold because no-MSE was stronger on fold1/fold3;
+  - current reliable baseline remains baseline4, not the new MSE-gap variants.
+
+## 2026-05-25 20:54 HKT MSE-Gap Training Strategy Exploration
+
+- Added optional, default-off true EarlyStopping support:
+  - `--early-stopping-patience` and `--early-stopping-min-delta` in `train.py`;
+  - `EARLY_STOPPING_PATIENCE` and `EARLY_STOPPING_MIN_DELTA` plumbing in `scripts/ptv3_experiment_common.sh`;
+  - default behavior is unchanged because early stopping is disabled unless patience is explicitly set.
+- Extended `scripts/run_mse_gap_ckpt_strategy_2gpu.sh`:
+  - supports generic fixed-final-epoch strategies such as `last3`, `last5`, `last8`, `last10`, `last20`;
+  - supports `VARIANTS="mse"` or `VARIANTS="mse nomse"` so MSE-only sweeps can reuse a fixed no-MSE reference.
+- 5-fold paired training-strategy results on `ptv3_main_singledrug / pert_stratified_5fold`, 1 GPU per job, batch size 256:
+  - checkpoint metric `valid_auprc`: with/w/o AUPRC `0.652478 / 0.649925`, gap `+0.002553`;
+  - checkpoint metric `valid_auroc`: with/w/o AUPRC `0.646351 / 0.651120`, gap `-0.004769`;
+  - checkpoint metric `loss2`: with/w/o AUPRC `0.654020 / 0.660823`, gap `-0.006803`;
+  - checkpoint metric `total_loss`: with/w/o AUPRC `0.638232 / 0.660823`, gap `-0.022592`;
+  - fixed final epoch `last3 / last5 / last8 / last10 / last20` AUPRC gaps were `+0.006938 / +0.008071 / +0.023768 / +0.008423 / +0.012681`;
+  - best fixed-epoch result was `last8`, with/w/o AUROC `0.896146 / 0.886069`, with/w/o AUPRC `0.664738 / 0.640970`, AUPRC gap `+0.023768`.
+- MSE-weight and schedule sweeps under the best `last8` strategy:
+  - default `MSE_WEIGHT=0.25`: AUPRC gap `+0.023768`;
+  - `MSE_WEIGHT=0.5`: AUPRC gap `+0.020872`;
+  - `MSE_WEIGHT=1.0`: AUPRC gap `-0.002439`;
+  - `MSE_WEIGHT=0.5` with warmup-decay to `0.2x`: AUPRC gap `+0.020476`;
+  - `MSE_WEIGHT=1.0` with warmup-decay to `0.1x`: AUPRC gap `+0.013399`.
+- True EarlyStopping and short-budget best-checkpoint tests:
+  - `patience=3`, monitor `valid_auprc`: with/w/o AUPRC `0.662596 / 0.649925`, gap `+0.012671`;
+  - `patience=1`, monitor `valid_auprc`: with/w/o AUPRC `0.665790 / 0.667342`, gap `-0.001552`;
+  - `MAX_EPOCHS=5` with best valid AUPRC: with/w/o AUPRC `0.677288 / 0.669393`, gap `+0.007895`;
+  - `MAX_EPOCHS=8` with best valid AUPRC: with/w/o AUPRC `0.669420 / 0.654441`, gap `+0.014979`.
+- Conclusion:
+  - fair checkpoint/early-stop/MSE-weight training strategies did not expand the w/o-MSE AUPRC gap to 5 points;
+  - the strongest tested training-only setting is fixed final epoch `last8`, but its gap is only `+0.0238`;
+  - early stopping should remain optional infrastructure, not a default baseline change for the MSE ablation claim;
+  - no data files or data-processing code were modified.
+
+## 2026-05-26 12:05 HKT Model-Size Sweep on Unseen Drug/Cell
+
+- Added `scripts/run_model_size_sweep_2gpu.sh`:
+  - runs `fast_delta` capacity sweeps on `ptv3_main_singledrug` unseen-drug (`pert_stratified_5fold`) and unseen-cell (`cell_5fold`) splits;
+  - uses two single-GPU workers by default;
+  - keeps unseen-drug at baseline4 single-drug settings (`MSE_WEIGHT=0.25`, no covariate UNK);
+  - keeps unseen-cell at the current stronger full-covariate UNK setting (`MSE_WEIGHT=0.075`, `COVARIATE_UNK_DROPOUT=0.15`).
+- Added `scripts/model_size_sweep_report.py`:
+  - summarizes `run_manifest.json` files into markdown/json reports;
+  - supports merging multiple sweep prefixes for cross-run comparison.
+- Completed full 5-fold sweeps on 2 H200 GPUs:
+  - pure capacity / LR `3e-4`: `h128`, `h192`, `h256`, `h384`, `h512`, `h768`;
+  - large-model LR `2e-4`: `h384`, `h512`, `h768`;
+  - boundary large model: `h1024`, LR `2e-4`.
+- Final combined report:
+  - `logs/20260526_model_size_combined_report.md`;
+  - `logs/20260526_model_size_combined_report.json`.
+- Key results, compared against same-day `h384`, LR `3e-4` rerun:
+  - unseen drug baseline rerun: AUROC `0.896696`, AUPRC `0.652478`, `68.0s/fold`, `17.2M` params;
+  - unseen drug best: `h512`, LR `2e-4`, AUROC `0.903166`, AUPRC `0.677846`, `82.4s/fold`, `26.4M` params;
+  - unseen cell baseline rerun: AUROC `0.930355`, AUPRC `0.748441`, `68.2s/fold`, `17.2M` params;
+  - unseen cell best: `h768`, LR `2e-4`, AUROC `0.934922`, AUPRC `0.770017`, `100.6s/fold`, `40.8M` params;
+  - `h1024`, LR `2e-4` regressed on both tasks, so capacity appears saturated before 1024 hidden dim;
+  - `h128` is the fastest tested setting (`~55s/fold`, `5.6M` params) but loses unseen-drug AUPRC by about `0.0115` versus same-day `h384`.
+- Current recommendation:
+  - for unseen drug performance, use `h512` with LR `2e-4`;
+  - for unseen cell only, `h768` with LR `2e-4` is best but slower and only slightly above the historical `MSE_WEIGHT=0.075 + covUNK` reference (`0.767008` AUPRC);
+  - for efficiency-sensitive runs, `h128`/`h192` are viable compression ablations, but not the best-performance baseline.
+
+## 2026-05-26 13:27 HKT Default h512 Profile
+
+- Updated the default fast-delta model-size profile from h384 to h512:
+  - `HIDDEN_DIM`: `384` -> `512`;
+  - `EXPRESSION_LATENT_DIM`: `512` -> `768`;
+  - `COVARIATE_EMBEDDING_DIM`: `64` -> `96`.
+- Updated default learning rate from `3e-4` to `2e-4` so the no-env-var launcher matches the validated h512 full-suite setting.
+- Applied the defaults consistently in:
+  - `scripts/ptv3_experiment_common.sh`;
+  - `scripts/0521_baseline4_8gpu_parallel.sh`;
+  - `train.py`;
+  - `infer.py`;
+  - `model/fast_delta_model.py`;
+  - `scripts/README_ptv3_experiments.md`.
+- Reason:
+  - full `exp_01` to `exp_08` comparison showed h512 is the better single default than h768 because it is faster, stronger on the primary single unseen-drug split, and has stronger graph/MSE ablation gaps.
+- Validation:
+  - `bash -n scripts/ptv3_experiment_common.sh && bash -n scripts/0521_baseline4_task_specific_8gpu_parallel.sh && bash -n scripts/0521_baseline4_8gpu_parallel.sh` passed;
+  - `python -m py_compile train.py infer.py model/fast_delta_model.py` passed;
+  - sourcing `scripts/ptv3_experiment_common.sh` with size/LR variables unset prints `512 768 96 2e-4`.
+
+## 2026-05-26 14:22 HKT Extra Double-Drug test_label Evaluation
+
+- Added `scripts/report_extra_doubledrug_test_label_auprc.py` to recompute updated extra double-drug AUPRC from existing `predictions.parquet` files without rerunning GPU inference.
+- Updated Stage-1 extra double-drug standardization to prefer `data/rawdata/update_0526/extra_doubledrug/*_test_label.csv` and preserve raw `test` / `test_label` metadata.
+- Updated Step-3 split generation so `ptv3_extra_doubledrug_*` `test_only` excludes `test=0` / `test_label=delete` rows while retaining them in feature tables for audit.
+- Updated `infer.py` to carry `test` / `test_label` into predictions and emit `task_by_test_label` metrics when those columns exist.
+- Updated training-ready split validation to expect the same filtered extra double-drug `test_only` anchors.
+- Added normalized AUPRC reporting as `nauprc = auprc / auprc_baseline`, where `auprc_baseline = positive_count / valid_count`, because raw AUPRC is prevalence-sensitive.
+- `scripts/exp_08_extra_double_all_train_infer.sh` now prints and writes the extra double-drug `test_label` AUPRC/nAUPRC report after running Nature, NC, and Guomics inference.
+- Validation:
+  - `python -m py_compile scripts/report_extra_doubledrug_test_label_auprc.py scripts/show_extra_results.py infer.py model/fast_lightning.py model/training_ready_lightning.py utils/00_standardize_rawdata.py utils/09_build_data_splits.py utils/03_validate_training_ready_outputs.py` passed.
+  - `bash -n scripts/exp_08_extra_double_all_train_infer.sh` passed.
+  - Existing full extra-double predictions were post-processed successfully with evaluable counts: Guomics `3107`, NC `15155`, Nature `22956`.
+
+## 2026-05-26 16:22 HKT 2-GPU Full-Suite Launcher
+
+- Added `scripts/0526_baseline4_task_specific_2gpu_parallel.sh`.
+- The new launcher defaults to:
+  - `EXP_PREFIX=20260526_final_task_specific`;
+  - `GPU_IDS=0,1`;
+  - `DEVICES=1`;
+  - `RUN_EXTRA_TASKS=1`.
+- It keeps the task-specific single/double fast-delta defaults from `scripts/0521_baseline4_task_specific_8gpu_parallel.sh`.
+- It reuses the maintained full-suite scheduler `scripts/0521_baseline4_8gpu_parallel.sh`, so the execution flow remains `exp_01` through `exp_08`, including the updated extra double-drug `test_label` report in `exp_08`.
+- Validation:
+  - `bash -n scripts/0526_baseline4_task_specific_2gpu_parallel.sh` passed;
+  - `bash -n scripts/0521_baseline4_8gpu_parallel.sh` passed;
+  - script mode set to executable (`755`).
+
+## 2026-05-26 17:15 HKT h512 0526 Full-Suite Validation
+
+- Reviewed the current h512 baseline4 defaults and confirmed the active profile is:
+  - `HIDDEN_DIM=512`;
+  - `EXPRESSION_LATENT_DIM=768`;
+  - `COVARIATE_EMBEDDING_DIM=96`;
+  - `LEARNING_RATE=2e-4`.
+- Reviewed `scripts/0526_baseline4_task_specific_2gpu_parallel.sh`:
+  - constrains the maintained scheduler to `GPU_IDS=0,1` and `DEVICES=1`;
+  - preserves task-specific single/double settings from the baseline4 scheduler.
+- Updated `scripts/report_extra_doubledrug_test_label_auprc.py` so the extra double-drug grouped report includes AUROC and ACC in addition to AUPRC, prevalence baseline, nAUPRC, and counts.
+- Confirmed current extra double grouped reporting uses `feature_row_index` to join predictions back to `data/rawdata/update_0526/extra_doubledrug`, filters `test=1`, removes `test_label=delete`, and reports:
+  - `unseenCell_seenDrugCombo`;
+  - `unseenCell_unseenDrugCombo`;
+  - `combined`.
+- Validation passed:
+  - shell syntax checks for the 0526 launcher, 0521 scheduler, exp08 extra double script, and common experiment script;
+  - Python compile checks for `train.py`, `infer.py`, model modules, `scripts/show_extra_results.py`, and the grouped extra double report script.
+- Full 2-GPU run completed with all runtime rows successful:
+  - command: `WANDB_MODE=offline EXP_PREFIX=20260526_h512_nauprc_2gpu_offline_v1 GPU_IDS=0,1 bash scripts/0526_baseline4_task_specific_2gpu_parallel.sh`;
+  - runtime summary: `logs/20260526_h512_nauprc_2gpu_offline_v1_runtime_summary.tsv`;
+  - launcher log: `logs/20260526_h512_nauprc_2gpu_offline_v1_launcher.log`.
+- 5-fold averages from the run:
+  - single unseen drug: AUROC `0.903166`, AUPRC `0.677846`, nAUPRC `5.723701`;
+  - single unseen cell type: AUROC `0.933192`, AUPRC `0.792645`, nAUPRC `6.098465`;
+  - single unseen cell: AUROC `0.927191`, AUPRC `0.751375`, nAUPRC `6.228606`;
+  - single no MSE: AUROC `0.893265`, AUPRC `0.651609`, nAUPRC `5.499016`;
+  - single no graph: AUROC `0.853110`, AUPRC `0.579863`, nAUPRC `4.876731`;
+  - double unseen drug pair: AUROC `0.736534`, AUPRC `0.616861`, nAUPRC `1.526420`.
