@@ -1753,3 +1753,265 @@ python utils/01_validate_standardized_outputs.py
   - single no MSE: AUROC `0.893265`, AUPRC `0.651609`, nAUPRC `5.499016`;
   - single no graph: AUROC `0.853110`, AUPRC `0.579863`, nAUPRC `4.876731`;
   - double unseen drug pair: AUROC `0.736534`, AUPRC `0.616861`, nAUPRC `1.526420`.
+
+## 2026-05-27 00:31 HKT MSE-Gap Iteration
+
+- Added default-off MSE-gap experiment switches:
+  - `response_base_logit_scale`;
+  - `zero_init_delta_head`;
+  - `delta_logit_learnable`;
+  - `control_expression_dropout`;
+  - `mse_pretrain_epochs` / `mse_pretrain_bce_weight`;
+  - `delta_teacher_loss_weight`.
+- Extended `scripts/run_mse_gap_delta_screen_2gpu.sh` with paired two-GPU presets for expression-delta bridge, MSE warmup, high-dimensional delta, zero-init delta, learnable delta scale, expression dropout, and true-delta teacher experiments.
+- Validation passed:
+  - `python -m py_compile train.py infer.py model/fast_delta_model.py model/fast_lightning.py`;
+  - `bash -n scripts/ptv3_experiment_common.sh scripts/run_mse_gap_delta_screen_2gpu.sh`.
+- Full 5-fold confirmation:
+  - current h512 reference MSE gap remains AUPRC `+0.026237`;
+  - conservative candidate `learn_delta_b075_g2_init01`: with/w/o MSE AUPRC `0.652089 / 0.644282`, gap `+0.007807`;
+  - extreme expression-mediated pressure test `zdelta_b0_g0_dim32`: with/w/o MSE AUPRC `0.244446 / 0.120776`, gap `+0.123670`.
+- Conclusion: a >5-point MSE gap can be forced only by destroying base performance. None of the conservative MSE-gap variants should replace the current h512 baseline.
+- Detailed report: `docs/2026-05-27_mse_gap_experiment_results.md`.
+
+## 2026-05-28 12:54 HKT Default nAUPRC Reporting and Dose Covariate Experiment
+
+- Added default-off dose covariate support to training and inference:
+  - `--use-dose-covariate`;
+  - `--dose-covariate-fields`, defaulting to `pert_dose1 pert_dose2`.
+- The default no-dose covariate list remains unchanged unless the dose switch is enabled.
+- Updated shared experiment scripts so dose-enabled runs pass the same covariate configuration to both train and infer.
+- Added `scripts/report_ptv3_exp_results.py` for exp01-exp08 summaries with nAUPRC in the default table.
+- Updated model-size and covariate-analysis report scripts so nAUPRC is included by default.
+- Did not rerun or modify data standardization, training-ready data construction, or split generation scripts.
+- Validation passed:
+  - Python compile checks for `train.py`, `infer.py`, and report scripts;
+  - shell syntax checks for the common experiment script and relevant exp scripts;
+  - dose-enabled dataset load check returned 8 covariates including `pert_dose1` and `pert_dose2`;
+  - `git diff` for `utils/00_standardize_rawdata.py`, `utils/02_build_training_ready_data.py`, and `utils/09_build_data_splits.py` was empty.
+- Full one-GPU dose run completed:
+  - prefix: `20260528_dose_h512_lr2e4_v1`;
+  - runtime summary: `logs/20260528_dose_h512_lr2e4_v1_runtime_summary.tsv`.
+- Dose 5-fold averages:
+  - exp01 single unseen drug: AUROC `0.901005`, AUPRC `0.658997`, nAUPRC `5.567505`;
+  - exp02 single unseen cell type: AUROC `0.945831`, AUPRC `0.815531`, nAUPRC `6.188013`;
+  - exp03 single unseen cell: AUROC `0.928799`, AUPRC `0.765623`, nAUPRC `6.415258`;
+  - exp04 single no MSE: AUROC `0.895101`, AUPRC `0.628842`, nAUPRC `5.299508`;
+  - exp05 single no graph: AUROC `0.853265`, AUPRC `0.605805`, nAUPRC `5.107087`;
+  - exp06 double unseen drug pair: AUROC `0.820416`, AUPRC `0.768876`, nAUPRC `1.911960`.
+
+## 2026-05-28 23:09 HKT Dose Covariate Parameter Search
+
+- Added `scripts/run_dose_param_search.sh` and `scripts/dose_param_search_report.py` for staged dose-enabled hyperparameter search without changing model size:
+  - fixed model profile: hidden dim `512`, expression latent dim `768`, covariate embedding dim `96`;
+  - dose enabled by `USE_DOSE_COVARIATE=1` with `pert_dose1 pert_dose2`;
+  - search covered learning rate, batch size, dropout, MSE weight, inactive-label MSE weight, ranking loss, and covariate/dropout variants.
+- Did not modify or rerun data processing, training-ready construction, or split-generation code.
+- Validation passed:
+  - `python -m py_compile train.py infer.py scripts/dose_param_search_report.py scripts/report_ptv3_exp_results.py`;
+  - `bash -n scripts/run_dose_param_search.sh scripts/ptv3_experiment_common.sh`;
+  - `git diff` was empty for `utils/00_standardize_rawdata.py`, `utils/02_build_training_ready_data.py`, `utils/09_build_data_splits.py`, and `data/Data_Process_[1-4].md`.
+- Selected dose parameter sets:
+  - exp01/04/05 single unseen pert_id and ablations: `mse075_drop010`;
+  - exp03 unseen cell: `lr1e4`;
+  - exp02 unseen cell type: `ctrl_drop020` after completing all compared stage3 candidates to 5 folds;
+  - exp06 double unseen drug pair: `dbl_mse010`;
+  - exp07 mat[1-4] extra single: `mse050_lr1e4`;
+  - exp08 extra double drug: `lr3e4`.
+- Final selected metrics:
+  - exp01 single unseen drug: AUROC `0.898136`, AUPRC `0.660333`, nAUPRC `5.574654`;
+  - exp04 w/o MSE: AUROC `0.895242`, AUPRC `0.648277`, nAUPRC `5.492080`;
+  - exp05 w/o graph: AUROC `0.842970`, AUPRC `0.596229`, nAUPRC `5.023520`;
+  - exp02 unseen cell type: AUROC `0.942154`, AUPRC `0.817573`, nAUPRC `6.237695`;
+  - exp03 unseen cell: AUROC `0.932460`, AUPRC `0.774338`, nAUPRC `6.493304`;
+  - exp06 double unseen drug pair: AUROC `0.808599`, AUPRC `0.736157`, nAUPRC `1.825010`;
+  - exp07 extra single mean: AUROC `0.751748`, AUPRC `0.547417`, nAUPRC `2.582783`;
+  - exp08 extra double mean: AUROC `0.627824`, AUPRC `0.079844`, nAUPRC `1.918203`.
+- Stage1 ablation gaps from the final 5-fold run:
+  - w/o MSE gap: AUPRC `+0.012056`;
+  - w/o graph gap: AUPRC `+0.064104`.
+
+## 2026-06-01 11:21 HKT Cell-Drug Time-Collapsed Evaluation
+
+- Added `scripts/report_cell_drug_time_eval.py` to report every PTV3 exp01-exp08 result under three evaluation modes:
+  - `original`: current row/time-point level evaluation;
+  - `cell-drug-bylasttime`: one datapoint per cell-drug or cell-drug-combo using the maximum numeric `pert_time`; ties at the last time are averaged;
+  - `cell-drug-avgtime`: one datapoint per cell-drug or cell-drug-combo using the average prediction across all time rows.
+- The report computes AUROC, AUPRC, prevalence baseline, nAUPRC, count, positive count, negative count, label-conflict count, and missing-time group count.
+- For exp01-exp06, the reporter can materialize fold-level test predictions from existing checkpoints with `infer.py`; this avoids retraining solely for re-evaluation.
+- For exp07/exp08, the reporter reads existing extra inference `predictions.parquet` files directly.
+- Updated `infer.py` so new prediction files carry `pert_time`, dose, and batch metadata when present. The reporter still joins back to each task `feature_table` by `feature_row_index`, so older prediction files remain evaluable.
+- Added `scripts/run_selected_param_full_suite.sh` to rerun the final parameter-search-selected configuration:
+  - exp01/04/05: `mse075_drop010`;
+  - exp02: `ctrl_drop020`;
+  - exp03: `lr1e4`;
+  - exp06: `dbl_mse010`;
+  - exp07: `mse050_lr1e4`;
+  - exp08: `lr3e4`.
+- The selected-suite launcher trains all selected experiments, runs extra inference, then calls the cell-drug time-collapsed reporter and writes:
+  - `${OUTPUT_DIR}/${BASE_PREFIX}_cell_drug_time_eval.csv`;
+  - `${OUTPUT_DIR}/${BASE_PREFIX}_cell_drug_time_eval.json`;
+  - `${LOG_DIR}/${BASE_PREFIX}_cell_drug_time_eval.md`.
+- Validation before full retraining:
+  - `python -m py_compile infer.py scripts/report_cell_drug_time_eval.py scripts/report_ptv3_exp_results.py` passed;
+  - `bash -n scripts/run_selected_param_full_suite.sh` passed;
+  - extra single and extra double existing prediction smoke checks passed for the three evaluation modes.
+
+## 2026-06-01 12:18 HKT Cell-Drug Full Selected Retraining Results
+
+- Reran the full selected configuration suite with prefix `20260601_cell_drug_selected_full_v1` and `GPU_IDS=0`.
+- Runtime summary: `logs/20260601_cell_drug_selected_full_v1_runtime_summary.tsv`.
+  - `41/41` commands exited with status `0`;
+  - `32` train commands and `9` inference commands completed.
+- Cell-drug evaluation outputs:
+  - `outputs/20260601_cell_drug_selected_full_v1_cell_drug_time_eval.csv`;
+  - `outputs/20260601_cell_drug_selected_full_v1_cell_drug_time_eval.json`;
+  - `logs/20260601_cell_drug_selected_full_v1_cell_drug_time_eval.md`.
+- Summary metrics:
+  - exp01 single unseen drug:
+    - original: AUROC `0.898153`, AUPRC `0.666963`, nAUPRC `5.632660`;
+    - cell-drug-bylasttime: AUROC `0.898841`, AUPRC `0.670592`, nAUPRC `5.687552`;
+    - cell-drug-avgtime: AUROC `0.898938`, AUPRC `0.668244`, nAUPRC `5.665939`.
+  - exp02 single unseen cell type:
+    - original: AUROC `0.942208`, AUPRC `0.818603`, nAUPRC `6.245977`;
+    - cell-drug-bylasttime: AUROC `0.941977`, AUPRC `0.818496`, nAUPRC `6.261922`;
+    - cell-drug-avgtime: AUROC `0.943112`, AUPRC `0.821349`, nAUPRC `6.278684`.
+  - exp03 single unseen cell:
+    - original: AUROC `0.932452`, AUPRC `0.777002`, nAUPRC `6.514967`;
+    - cell-drug-bylasttime: AUROC `0.931772`, AUPRC `0.776499`, nAUPRC `6.521652`;
+    - cell-drug-avgtime: AUROC `0.933672`, AUPRC `0.781928`, nAUPRC `6.566714`.
+  - exp04 single w/o MSE:
+    - original: AUROC `0.895315`, AUPRC `0.651119`, nAUPRC `5.515379`;
+    - cell-drug-bylasttime: AUROC `0.895131`, AUPRC `0.651950`, nAUPRC `5.545950`;
+    - cell-drug-avgtime: AUROC `0.896577`, AUPRC `0.655386`, nAUPRC `5.572692`.
+  - exp05 single w/o graph:
+    - original: AUROC `0.842961`, AUPRC `0.599514`, nAUPRC `5.051623`;
+    - cell-drug-bylasttime: AUROC `0.842036`, AUPRC `0.594336`, nAUPRC `5.025268`;
+    - cell-drug-avgtime: AUROC `0.844718`, AUPRC `0.601805`, nAUPRC `5.085172`.
+  - exp06 double unseen drug pair:
+    - original: AUROC `0.810580`, AUPRC `0.754331`, nAUPRC `1.872959`;
+    - cell-drug-bylasttime: AUROC `0.796436`, AUPRC `0.714644`, nAUPRC `1.954498`;
+    - cell-drug-avgtime: AUROC `0.800986`, AUPRC `0.720658`, nAUPRC `1.971408`;
+    - collapsed modes skipped `10` label-conflict cell-drug-combo groups.
+  - exp07 extra single:
+    - original: AUROC `0.751748`, AUPRC `0.547417`, nAUPRC `2.582783`;
+    - cell-drug-bylasttime: AUROC `0.751827`, AUPRC `0.547771`, nAUPRC `2.583577`;
+    - cell-drug-avgtime: AUROC `0.751827`, AUPRC `0.547771`, nAUPRC `2.583577`;
+    - collapsed modes skipped `28` label-conflict cell-drug groups.
+  - exp08 extra double:
+    - original: AUROC `0.627824`, AUPRC `0.079844`, nAUPRC `1.918203`;
+    - cell-drug-bylasttime: AUROC `0.613931`, AUPRC `0.069015`, nAUPRC `1.822739`;
+    - cell-drug-avgtime: AUROC `0.613931`, AUPRC `0.069015`, nAUPRC `1.822739`;
+    - collapsed modes skipped `474` label-conflict cell-drug-combo groups.
+- For exp07 and exp08, `pert_time` is unavailable for the extra feature rows used here, so `cell-drug-bylasttime` falls back to all rows for those groups and matches `cell-drug-avgtime`.
+
+## 2026-06-01 15:41 HKT Cell-Drug-Dose Time-Collapsed Evaluation
+
+- Updated `scripts/report_cell_drug_time_eval.py` so collapsed evaluation uses one datapoint per cell-drug-dose group:
+  - single-drug grouping key: `Cell + pert_id1 + pert_dose1_norm`;
+  - double-drug grouping key: `Cell + sorted((pert_id1, pert_dose1_norm), (pert_id2, pert_dose2_norm))`.
+- Renamed collapsed report methods to:
+  - `cell-drug-dose-bylasttime`;
+  - `cell-drug-dose-avgtime`.
+- Updated `scripts/run_selected_param_full_suite.sh` so future selected-suite reports write:
+  - `outputs/${BASE_PREFIX}_cell_drug_dose_time_eval.csv`;
+  - `outputs/${BASE_PREFIX}_cell_drug_dose_time_eval.json`;
+  - `logs/${BASE_PREFIX}_cell_drug_dose_time_eval.md`.
+- Re-evaluated the existing `20260601_cell_drug_selected_full_v1` predictions without retraining.
+- New result document: `docs/2026-06-01_cell_drug_dose_time_eval_results.md`.
+- Dose-aware output files:
+  - `outputs/20260601_cell_drug_selected_full_v1_cell_drug_dose_time_eval.csv`;
+  - `outputs/20260601_cell_drug_selected_full_v1_cell_drug_dose_time_eval.json`;
+  - `logs/20260601_cell_drug_selected_full_v1_cell_drug_dose_time_eval.md`.
+- exp06 dose-aware collapsed metrics:
+  - `cell-drug-dose-bylasttime`: AUROC `0.808264`, AUPRC `0.753058`, nAUPRC `1.867977`;
+  - `cell-drug-dose-avgtime`: AUROC `0.812681`, AUPRC `0.757687`, nAUPRC `1.879982`;
+  - label-conflict groups dropped from `10` under cell-drug-only grouping to `0` under cell-drug-dose grouping.
+- Validation:
+  - `python -m py_compile scripts/report_cell_drug_time_eval.py infer.py train.py` passed;
+  - `bash -n scripts/run_selected_param_full_suite.sh` passed.
+
+## 2026-06-01 16:03 HKT Extra Subset Reporting Fix
+
+- Corrected the cell-drug-dose report presentation so exp07 and exp08 are reported by extra subset instead of only by `mean_extra`.
+- `scripts/report_cell_drug_time_eval.py` now prints separate Markdown sections:
+  - `Fold Summary` for exp01-exp06 mean5 rows;
+  - `Extra Subset Summary` for exp07/exp08 subset rows;
+  - `Extra Mean` as a convenience aggregate only;
+  - `Fold Detail` for fold-level rows.
+- Regenerated:
+  - `logs/20260601_cell_drug_selected_full_v1_cell_drug_dose_time_eval.md`;
+  - `outputs/20260601_cell_drug_selected_full_v1_cell_drug_dose_time_eval.csv`;
+  - `outputs/20260601_cell_drug_selected_full_v1_cell_drug_dose_time_eval.json`.
+- Updated `docs/2026-06-01_cell_drug_dose_time_eval_results.md` so exp07 reports each available mat subset separately and exp08 reports `guomics`, `nature`, and `nc` separately.
+- No retraining was run; this was a reporting/presentation correction over existing prediction files.
+- Validation:
+  - `python -m py_compile scripts/report_cell_drug_time_eval.py` passed;
+  - `bash -n scripts/run_selected_param_full_suite.sh` passed.
+
+## 2026-06-01 16:25 HKT exp08 test_label Reporting Fix
+
+- Updated `scripts/report_cell_drug_time_eval.py` so exp08 extra double reports each dataset under three groups:
+  - `unseenCell_seenDrugCombo`;
+  - `unseenCell_unseenDrugCombo`;
+  - `combined`.
+- The grouping follows the earlier 2026-05-26 `test_label` reporting contract and uses the `test_label` column carried into prediction metadata.
+- Regenerated:
+  - `logs/20260601_cell_drug_selected_full_v1_cell_drug_dose_time_eval.md`;
+  - `outputs/20260601_cell_drug_selected_full_v1_cell_drug_dose_time_eval.csv`;
+  - `outputs/20260601_cell_drug_selected_full_v1_cell_drug_dose_time_eval.json`.
+- Updated `docs/2026-06-01_cell_drug_dose_time_eval_results.md` so exp08 reports `guomics`, `nature`, and `nc` each under the three required groups.
+- `mean_extra` continues to aggregate only `combined` rows, so exp08 test-label groups are not double-counted in the convenience aggregate.
+- No retraining or inference was run; this was a reporting correction over existing prediction files.
+- Validation:
+  - `python -m py_compile scripts/report_cell_drug_time_eval.py` passed;
+  - `bash -n scripts/run_selected_param_full_suite.sh` passed.
+
+## 2026-06-01 20:55 HKT PTV3 Single-Drug Transcriptome AnnData Export
+
+- Added `utils/12_export_single_drug_transcriptome_anndata.py` to export the single-drug, non-ablation experiment data to AnnData.
+- Included exp01, exp02, exp03, and exp07; excluded exp04 `w/o MSE`, exp05 `w/o proteome/graph`, exp06 double-drug, and exp08 extra double-drug.
+- Output root: `data/transcriptome_anndata/ptv3_single_nonablation`.
+- Wrote common-gene-axis h5ad files under `common_gene_axis/` and native per-task h5ad files under `native_gene_axis/`.
+- UniProt accessions were mapped to HGNC gene symbols using HGNC complete set, local UniProt FASTA `GN=`, and UniProt REST fallback.
+- Mapping result: `11343` union UniProt features, `11310` mapped, `33` dropped for ambiguous or missing one-to-one HGNC mapping.
+- Duplicate UniProt-to-gene mappings are collapsed by row-wise `nanmean`; original accessions remain in `adata.var["source_uniprot_ids"]`.
+- Exact split membership is stored in `adata.uns["splits"]` and row-level `is_train/is_valid/is_test` columns, preserving the intentional train/test overlap in `all_train_subset_test`.
+- Data README written to `data/transcriptome_anndata/ptv3_single_nonablation/README.md`.
+- Detailed processing record written to `data/review/2026-06-01_2055_ptv3_single_transcriptome_anndata_processing.md`.
+- Validation:
+  - `python -m py_compile utils/12_export_single_drug_transcriptome_anndata.py` passed;
+  - all common-axis h5ad files were readable with `anndata.read_h5ad(..., backed="r")`;
+  - all common-axis h5ad files have identical `var_names`;
+  - checked test rows have matched control rows available.
+
+## 2026-06-01 22:07 HKT LLM Cell-Type Embedding Experiment
+
+- Added frozen LLM cell-type embedding support for the fast training and inference path.
+- Added `utils/11_build_cell_type_llm_embeddings.py` to generate cell-type natural-language descriptions with `gpt-5.4` and embeddings with `Qwen/Qwen3-Embedding-8B`.
+- Generated the `ptv3` artifact:
+  - `data/training_ready/ptv3/derived/cell_type_llm_embedding_qwen3_4096.npz`;
+  - `data/training_ready/ptv3/derived/cell_type_llm_embedding_qwen3_4096.json`.
+- Artifact details: shape `14 x 4096`; `no` cell type is zero vector; 13 real cell-type embeddings are L2-normalized.
+- Added `--cell-type-llm-mode {off,frozen}` and `--cell-type-llm-embedding-path` to `train.py` and `infer.py`.
+- `FastProteinTalkDataset` now emits optional `cell_type_features`; `FastDeltaDrugResponseModel` concatenates these frozen features with categorical covariate embeddings before covariate projection.
+- Updated `scripts/ptv3_experiment_common.sh` and `scripts/report_cell_drug_time_eval.py` so LLM cell-type settings propagate through train, inference, and materialized fold prediction reports.
+- Network/API check used `proxy_on2`; `ALL_PROXY` was unset for OpenAI-compatible Python client calls because the `flow_v2` env lacks SOCKS support.
+- Ran exp01 parameter screen with `CELL_TYPE_LLM_MODE=frozen`; selected `mse050` for the full run.
+- Ran the full exp01-exp08 suite under prefix `20260601_llm_celltype_full_v1`.
+- Final result document: `docs/2026-06-01_llm_celltype_embedding_experiment_results.md`.
+- Final report files:
+  - `logs/20260601_llm_celltype_full_v1_cell_drug_dose_time_eval.md`;
+  - `outputs/20260601_llm_celltype_full_v1_cell_drug_dose_time_eval.csv`;
+  - `outputs/20260601_llm_celltype_full_v1_cell_drug_dose_time_eval.json`.
+- Key mean5 results:
+  - exp01 original AUROC/AUPRC/n-AUPRC: `0.896777 / 0.668358 / 5.644481`;
+  - exp01 cell-drug-dose-avgtime: `0.897524 / 0.670102 / 5.681576`;
+  - exp02 original: `0.938004 / 0.802386 / 6.088709`;
+  - exp03 original: `0.930120 / 0.777466 / 6.511693`;
+  - exp06 original: `0.805866 / 0.730924 / 1.811493`;
+  - exp06 cell-drug-dose-avgtime: `0.808670 / 0.738014 / 1.827928`.
+- exp07 reports the available extra single-drug mat subsets; exp08 reports guomics, nature, and nc separately, each under `unseenCell_seenDrugCombo`, `unseenCell_unseenDrugCombo`, and `combined`.
+- Validation:
+  - `python -m py_compile utils/11_build_cell_type_llm_embeddings.py dataset/training_ready_fast_dataset.py model/fast_delta_model.py train.py infer.py scripts/report_cell_drug_time_eval.py` passed;
+  - `bash -n scripts/ptv3_experiment_common.sh scripts/run_dose_param_search.sh scripts/exp_01_single_pert_stratified_5fold.sh scripts/exp_07_extra_single_all_train_infer.sh scripts/exp_08_extra_double_all_train_infer.sh` passed.

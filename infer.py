@@ -45,13 +45,18 @@ from model.graph_feature_utils import build_or_load_graph_features
 from model.training_ready_lightning import ProteinTalkLightning, binary_metrics, compute_validation_metrics
 from model.training_ready_models import FAST_DELTA_MODEL_NAME, GRAPH_MODEL_NAMES, ModelArtifacts, SELECTED_MODEL_NAMES, build_model
 from train import (
+    DEFAULT_BATCH_COVARIATES,
+    DEFAULT_DOSE_COVARIATES,
+    apply_dose_covariates,
     build_fast_target_expression_weights,
     category_sizes,
     default_derived_paths,
     graph_feature_blocks_from_meta,
     infer_label_key,
+    load_fast_cell_type_llm_features,
     load_pdi_matrix,
     resolve_task_loss_config,
+    resolve_cell_type_llm_embedding_path,
 )
 
 
@@ -71,7 +76,17 @@ def dump_json(path: Path, payload: object) -> None:
 
 
 def append_optional_prediction_metadata(prediction_df: pd.DataFrame, rows: pd.DataFrame) -> pd.DataFrame:
-    for column in ("test", "test_label"):
+    for column in (
+        "pert_time",
+        "pert_time_norm",
+        "pert_dose1",
+        "pert_dose2",
+        "pert_dose1_norm",
+        "pert_dose2_norm",
+        "batch",
+        "test",
+        "test_label",
+    ):
         if column in rows.columns:
             prediction_df[column] = rows[column].tolist()
     return prediction_df
@@ -339,14 +354,21 @@ LEGACY_FAST_MANIFEST_DEFAULTS = {
     "pair_logit_scale": 0.0,
     "target_logit_scale": 0.0,
     "covariate_logit_scale": 0.0,
+    "response_base_logit_scale": 1.0,
     "response_delta_mode": "off",
     "response_delta_dim": 64,
     "response_delta_seed": 31,
     "response_delta_detach": False,
     "delta_logit_scale": 0.0,
+    "delta_logit_learnable": False,
     "use_ddi": False,
     "residual_expression": True,
     "init_delta_scale": 0.1,
+    "zero_init_delta_head": False,
+    "control_expression_dropout": 0.0,
+    "cell_type_llm_mode": "off",
+    "cell_type_llm_embedding_path": None,
+    "cell_type_llm_feature_dim": 0,
 }
 
 
@@ -401,11 +423,16 @@ def current_fast_model_config(args) -> dict[str, object]:
         "pair_logit_scale": args.pair_logit_scale,
         "target_logit_scale": args.target_logit_scale,
         "covariate_logit_scale": args.covariate_logit_scale,
+        "response_base_logit_scale": args.response_base_logit_scale,
         "response_delta_mode": args.response_delta_mode,
         "response_delta_dim": args.response_delta_dim,
         "response_delta_seed": args.response_delta_seed,
         "response_delta_detach": args.response_delta_detach,
         "delta_logit_scale": args.delta_logit_scale,
+        "delta_logit_learnable": args.delta_logit_learnable,
+        "cell_type_llm_mode": args.cell_type_llm_mode,
+        "cell_type_llm_embedding_path": args.cell_type_llm_embedding_path_resolved,
+        "cell_type_llm_feature_dim": args.cell_type_llm_feature_dim,
         "batch_cov_list": args.batch_cov_list,
         "hidden_dim": args.hidden_dim,
         "expression_latent_dim": args.expression_latent_dim,
@@ -418,6 +445,8 @@ def current_fast_model_config(args) -> dict[str, object]:
         "use_ddi": args.use_ddi,
         "residual_expression": args.residual_expression,
         "init_delta_scale": args.init_delta_scale,
+        "zero_init_delta_head": args.zero_init_delta_head,
+        "control_expression_dropout": args.control_expression_dropout,
     }
 
 
@@ -557,6 +586,7 @@ def run_fast_inference(args) -> None:
     args.pdi_matrix_path_resolved = str(pdi_matrix_path.resolve())
     args.ddi_matrix_path_resolved = str(ddi_matrix_path.resolve())
     args.ordered_protein_index_path = str((task_dir / "feature_ordered_protein_index.json").resolve())
+    resolve_cell_type_llm_embedding_path(args, training_ready_root, args.dataset_group)
     args.effective_key1 = args.effective_key1 or infer_label_key(args.task_name)
     task_loss_config = resolve_task_loss_config(
         task_name=args.task_name,
@@ -573,6 +603,12 @@ def run_fast_inference(args) -> None:
     artifacts = FastTrainingReadyArtifacts.load(task_dir, meta_path)
     protein_embedding = load_fast_embedding_matrix(protein_embedding_path)
     drug_embedding = load_fast_embedding_matrix(drug_embedding_path)
+    cell_type_feature_matrix, cell_type_llm_summary = load_fast_cell_type_llm_features(
+        args=args,
+        artifacts=artifacts,
+        training_ready_root=training_ready_root,
+    )
+    args.cell_type_llm_feature_dim = int(cell_type_llm_summary.get("feature_dim", 0))
     checkpoint_manifest = validate_fast_checkpoint_config(
         args,
         allow_mismatch=args.allow_checkpoint_config_mismatch,
@@ -636,6 +672,7 @@ def run_fast_inference(args) -> None:
         expression_column_index=expression_column_index,
         covariate_known_values=covariate_known_values,
         covariate_unknown_indices=covariate_unknown_indices,
+        cell_type_feature_matrix=cell_type_feature_matrix,
     )
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
     model = FastDeltaDrugResponseModel(
@@ -684,14 +721,19 @@ def run_fast_inference(args) -> None:
         pair_logit_scale=args.pair_logit_scale,
         target_logit_scale=args.target_logit_scale,
         covariate_logit_scale=args.covariate_logit_scale,
+        response_base_logit_scale=args.response_base_logit_scale,
         response_delta_mode=args.response_delta_mode,
         response_delta_dim=args.response_delta_dim,
         response_delta_seed=args.response_delta_seed,
         response_delta_detach=args.response_delta_detach,
         delta_logit_scale=args.delta_logit_scale,
+        delta_logit_learnable=args.delta_logit_learnable,
+        cell_type_feature_dim=args.cell_type_llm_feature_dim,
         use_ddi=args.use_ddi,
         residual_expression=args.residual_expression,
         init_delta_scale=args.init_delta_scale,
+        zero_init_delta_head=args.zero_init_delta_head,
+        control_expression_dropout=args.control_expression_dropout,
     )
     lightning_model = FastProteinTalkLightning(
         model,
@@ -849,6 +891,13 @@ def run_fast_inference(args) -> None:
             "task_head": task_loss_config["task_head"],
             "task_label_key": task_loss_config["task_label_key"],
             "task_mask_key": task_loss_config["task_mask_key"],
+            "batch_cov_list": list(args.batch_cov_list),
+            "use_dose_covariate": bool(args.use_dose_covariate),
+            "dose_covariate_fields": list(args.dose_covariate_fields),
+            "cell_type_llm_mode": args.cell_type_llm_mode,
+            "cell_type_llm_feature_dim": args.cell_type_llm_feature_dim,
+            "cell_type_llm_embedding_path": args.cell_type_llm_embedding_path_resolved,
+            "cell_type_llm_summary": cell_type_llm_summary,
             "prediction_path": str(prediction_path),
             "n_predictions": int(len(prediction_df)),
             "save_expression_pred": bool(args.save_expression_pred),
@@ -928,7 +977,18 @@ def main() -> None:
     parser.add_argument(
         "--batch-cov-list",
         nargs="*",
-        default=["machineID_new", "Cell_plate", "Cell", "cell_type", "batch", "pert_time"],
+        default=DEFAULT_BATCH_COVARIATES,
+    )
+    parser.add_argument(
+        "--use-dose-covariate",
+        action="store_true",
+        help="Append perturbation dose covariates to --batch-cov-list. Default is off.",
+    )
+    parser.add_argument(
+        "--dose-covariate-fields",
+        nargs="*",
+        default=DEFAULT_DOSE_COVARIATES,
+        help="Dose covariate fields appended when --use-dose-covariate is set.",
     )
     parser.add_argument("--protein-embedding-path", default=None)
     parser.add_argument("--drug-embedding-path", default=None)
@@ -992,14 +1052,29 @@ def main() -> None:
     parser.add_argument("--pair-logit-scale", type=float, default=0.0)
     parser.add_argument("--target-logit-scale", type=float, default=0.0)
     parser.add_argument("--covariate-logit-scale", type=float, default=0.0)
+    parser.add_argument("--response-base-logit-scale", type=float, default=1.0)
     parser.add_argument("--response-delta-mode", choices=["off", "summary", "gate"], default="off")
     parser.add_argument("--response-delta-dim", type=int, default=64)
     parser.add_argument("--response-delta-seed", type=int, default=31)
     parser.add_argument("--response-delta-detach", action="store_true")
     parser.add_argument("--delta-logit-scale", type=float, default=0.0)
+    parser.add_argument("--delta-logit-learnable", action="store_true")
+    parser.add_argument(
+        "--cell-type-llm-mode",
+        choices=["off", "frozen"],
+        default="off",
+        help="Use frozen LLM-derived cell_type text embeddings as continuous covariates.",
+    )
+    parser.add_argument(
+        "--cell-type-llm-embedding-path",
+        default=None,
+        help="Path to cell_type LLM embedding .npz; defaults to data/training_ready/<group>/derived/cell_type_llm_embedding_qwen3_4096.npz.",
+    )
     parser.add_argument("--use-ddi", action="store_true")
     parser.add_argument("--absolute-expression-head", action="store_false", dest="residual_expression")
     parser.add_argument("--init-delta-scale", type=float, default=0.1)
+    parser.add_argument("--zero-init-delta-head", action="store_true")
+    parser.add_argument("--control-expression-dropout", type=float, default=0.0)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--limit-batches", type=int, default=None, help="Optional smoke-test cap on inference batches")
@@ -1025,6 +1100,7 @@ def main() -> None:
         help="Allow inference when checkpoint run_manifest.json is not marked fit_completed for migration/debug runs",
     )
     args = parser.parse_args()
+    apply_dose_covariates(args)
     if args.split_strategy == "":
         args.split_strategy = None
     if args.model_type == FAST_DELTA_MODEL_NAME:
@@ -1280,6 +1356,9 @@ def main() -> None:
             "task_head": task_loss_config["task_head"],
             "task_label_key": task_loss_config["task_label_key"],
             "task_mask_key": task_loss_config["task_mask_key"],
+            "batch_cov_list": list(args.batch_cov_list),
+            "use_dose_covariate": bool(args.use_dose_covariate),
+            "dose_covariate_fields": list(args.dose_covariate_fields),
             "prediction_path": str(prediction_path),
             "n_predictions": int(len(prediction_df)),
             "save_expression_pred": bool(args.save_expression_pred),

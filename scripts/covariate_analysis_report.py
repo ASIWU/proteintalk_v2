@@ -254,6 +254,8 @@ def collect_run_results(
                     "best_epoch": checkpoint_epoch(manifest.get("best_model_path")),
                     "test_auroc": metrics.get("test/auroc"),
                     "test_auprc": metrics.get("test/auprc"),
+                    "test_auprc_baseline": metrics.get("test/task_auprc_baseline"),
+                    "test_nauprc": metrics.get("test/task_nauprc"),
                     "test_acc": metrics.get("test/acc"),
                     "test_count": metrics.get("test/task_count"),
                     "duration_sec": runtimes.get(exp_name, {}).get("duration_sec"),
@@ -271,7 +273,7 @@ def collect_run_results(
         base = baselines.get(row["task"])
         if not base:
             continue
-        for metric in ["test_auroc", "test_auprc", "best_valid_auprc"]:
+        for metric in ["test_auroc", "test_auprc", "test_nauprc", "best_valid_auprc"]:
             if row.get(metric) is not None and base.get(metric) is not None:
                 row[f"delta_{metric}"] = float(row[metric] - base[metric])
     return rows
@@ -315,7 +317,9 @@ def build_markdown(payload: dict[str, Any]) -> str:
                     "yes" if row.get("covariate_unk_for_unseen") else "no",
                     format_float(row.get("test_auroc")),
                     format_float(row.get("test_auprc")),
+                    format_float(row.get("test_nauprc")),
                     format_float(row.get("delta_test_auprc")),
+                    format_float(row.get("delta_test_nauprc")),
                     format_float(row.get("best_valid_auprc")),
                     str(row.get("best_epoch") if row.get("best_epoch") is not None else "-"),
                     str(row.get("duration_sec") if row.get("duration_sec") is not None else "-"),
@@ -329,7 +333,9 @@ def build_markdown(payload: dict[str, Any]) -> str:
                     "unk",
                     "test_auroc",
                     "test_auprc",
+                    "test_nauprc",
                     "delta_auprc_vs_full",
+                    "delta_nauprc_vs_full",
                     "best_valid_auprc",
                     "best_epoch",
                     "sec",
