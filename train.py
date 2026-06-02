@@ -139,6 +139,94 @@ def default_derived_paths(training_ready_root: Path, dataset_group: str) -> dict
         "ppi_matrix": derived / "ppi_matrix.npy",
         "pdi_matrix": derived / "pdi_matrix.npy",
         "ddi_matrix": derived / "ddi_matrix.npy",
+        "cell_type_llm_embedding": derived / "cell_type_llm_embedding_qwen3_4096.npz",
+    }
+
+
+DEFAULT_BATCH_COVARIATES = ["machineID_new", "Cell_plate", "Cell", "cell_type", "batch", "pert_time"]
+DEFAULT_DOSE_COVARIATES = ["pert_dose1", "pert_dose2"]
+
+
+def append_unique(values: list[str], additions: list[str]) -> list[str]:
+    result = list(values)
+    seen = set(result)
+    for item in additions:
+        if item not in seen:
+            result.append(item)
+            seen.add(item)
+    return result
+
+
+def apply_dose_covariates(args: argparse.Namespace) -> None:
+    args.dose_covariate_fields = list(args.dose_covariate_fields or DEFAULT_DOSE_COVARIATES)
+    if args.use_dose_covariate:
+        args.batch_cov_list = append_unique(list(args.batch_cov_list), args.dose_covariate_fields)
+
+
+def resolve_cell_type_llm_embedding_path(args: argparse.Namespace, training_ready_root: Path, dataset_group: str) -> Path | None:
+    mode = str(getattr(args, "cell_type_llm_mode", "off")).lower()
+    if mode == "off":
+        args.cell_type_llm_embedding_path_resolved = None
+        return None
+    path = (
+        Path(args.cell_type_llm_embedding_path)
+        if getattr(args, "cell_type_llm_embedding_path", None)
+        else default_derived_paths(training_ready_root, dataset_group)["cell_type_llm_embedding"]
+    )
+    args.cell_type_llm_embedding_path_resolved = str(path.resolve())
+    return path
+
+
+def load_fast_cell_type_llm_features(
+    *,
+    args: argparse.Namespace,
+    artifacts: FastTrainingReadyArtifacts,
+    training_ready_root: Path,
+) -> tuple[np.ndarray | None, dict[str, Any]]:
+    mode = str(getattr(args, "cell_type_llm_mode", "off")).lower()
+    if mode == "off":
+        args.cell_type_llm_embedding_path_resolved = None
+        return None, {"mode": "off", "feature_dim": 0, "enabled": False}
+    if mode != "frozen":
+        raise ValueError(f"unsupported cell_type_llm_mode: {mode!r}")
+    path = resolve_cell_type_llm_embedding_path(args, training_ready_root, artifacts.meta["dataset_group"])
+    if path is None or not path.exists():
+        raise FileNotFoundError(f"missing cell-type LLM embedding artifact: {path}")
+    payload = np.load(path, allow_pickle=False)
+    if "embedding_matrix" in payload.files:
+        embedding_matrix = payload["embedding_matrix"].astype(np.float32, copy=False)
+    elif "cell_type_embeddings" in payload.files:
+        embedding_matrix = payload["cell_type_embeddings"].astype(np.float32, copy=False)
+    else:
+        raise ValueError(f"{path} must contain embedding_matrix or cell_type_embeddings")
+    if embedding_matrix.ndim != 2:
+        raise ValueError(f"cell-type LLM embedding matrix must be 2D, got {embedding_matrix.shape}")
+    if "cell_type_index" not in artifacts.df.columns:
+        raise KeyError("cell-type LLM features require cell_type_index in feature_table")
+    import pandas as pd
+
+    row_indices = pd.to_numeric(artifacts.df["cell_type_index"], errors="coerce").fillna(0).astype(np.int64).to_numpy()
+    if row_indices.min(initial=0) < 0 or row_indices.max(initial=0) >= embedding_matrix.shape[0]:
+        raise ValueError(
+            "feature_table cell_type_index exceeds cell-type LLM embedding rows; "
+            f"max_index={int(row_indices.max(initial=0))} rows={embedding_matrix.shape[0]}"
+        )
+    row_features = embedding_matrix[row_indices].astype(np.float32, copy=False)
+    meta = {}
+    if "meta_json" in payload.files:
+        try:
+            meta = json.loads(str(payload["meta_json"].item()))
+        except (json.JSONDecodeError, ValueError, TypeError):
+            meta = {}
+    return row_features, {
+        "mode": mode,
+        "enabled": True,
+        "feature_dim": int(row_features.shape[1]),
+        "embedding_path": str(path.resolve()),
+        "embedding_rows": int(embedding_matrix.shape[0]),
+        "embedding_model": meta.get("embedding_model"),
+        "description_model": meta.get("description_model"),
+        "normalized": meta.get("normalized"),
     }
 
 
@@ -757,6 +845,11 @@ def build_fast_data_loaders(
         valid_set_info=valid_set_info,
         test_set_info=test_set_info,
     )
+    cell_type_feature_matrix, cell_type_llm_summary = load_fast_cell_type_llm_features(
+        args=args,
+        artifacts=artifacts,
+        training_ready_root=Path(args.training_ready_root),
+    )
     dataset_kwargs = {
         "artifacts": artifacts,
         "drug_embedding_matrix": drug_embedding,
@@ -771,6 +864,7 @@ def build_fast_data_loaders(
         "covariate_unknown_indices": covariate_unknown_indices,
         "covariate_unk_dropout": args.covariate_unk_dropout,
         "prior_feature_matrix": prior_feature_matrix,
+        "cell_type_feature_matrix": cell_type_feature_matrix,
     }
     train_dataset = FastProteinTalkDataset(
         indices=train_indices,
@@ -837,6 +931,7 @@ def build_fast_data_loaders(
         "covariate_unk_fields": list(covariate_unknown_indices),
         "covariate_unk_dropout": args.covariate_unk_dropout,
         "cell_prior": prior_summary,
+        "cell_type_llm": cell_type_llm_summary,
     }
     return train_loader, valid_loader, test_loader, split_summary, train_indices
 
@@ -1416,6 +1511,8 @@ def run_fast_training(args: argparse.Namespace) -> None:
         ppi_matrix_path=ppi_matrix_path,
     )
     prior_feature_dim = int(split_summary.get("cell_prior", {}).get("feature_dim", 0))
+    cell_type_feature_dim = int(split_summary.get("cell_type_llm", {}).get("feature_dim", 0))
+    args.cell_type_llm_feature_dim = cell_type_feature_dim
 
     model = FastDeltaDrugResponseModel(
         n_genes=int(artifacts.expression_matrix.shape[1]),
@@ -1464,18 +1561,23 @@ def run_fast_training(args: argparse.Namespace) -> None:
         pair_logit_gate=args.pair_logit_gate,
         target_logit_scale=args.target_logit_scale,
         covariate_logit_scale=args.covariate_logit_scale,
+        response_base_logit_scale=args.response_base_logit_scale,
         response_delta_mode=args.response_delta_mode,
         response_delta_dim=args.response_delta_dim,
         response_delta_seed=args.response_delta_seed,
         response_delta_detach=args.response_delta_detach,
         delta_logit_scale=args.delta_logit_scale,
+        delta_logit_learnable=args.delta_logit_learnable,
         aux_covariate_sizes=aux_covariate_sizes,
+        cell_type_feature_dim=cell_type_feature_dim,
         prior_feature_dim=prior_feature_dim,
         prior_logit_scale=args.cell_prior_logit_scale,
         prior_fixed_logit_scale=args.cell_prior_fixed_logit_scale,
         use_ddi=args.use_ddi,
         residual_expression=args.residual_expression,
         init_delta_scale=args.init_delta_scale,
+        zero_init_delta_head=args.zero_init_delta_head,
+        control_expression_dropout=args.control_expression_dropout,
     )
     if args.compile_model:
         model = torch.compile(model)
@@ -1498,6 +1600,8 @@ def run_fast_training(args: argparse.Namespace) -> None:
         mse_weight_schedule=args.mse_weight_schedule,
         mse_decay_start_epoch_frac=args.mse_decay_start_epoch_frac,
         mse_final_weight_multiplier=args.mse_final_weight_multiplier,
+        mse_pretrain_epochs=args.mse_pretrain_epochs,
+        mse_pretrain_bce_weight=args.mse_pretrain_bce_weight,
         label_smoothing=args.label_smoothing,
         aux_covariate_loss_weight=args.aux_covariate_loss_weight,
         aux_covariate_indices=aux_covariate_indices,
@@ -1508,6 +1612,7 @@ def run_fast_training(args: argparse.Namespace) -> None:
         ranking_loss_weight=args.ranking_loss_weight,
         ranking_loss_margin=args.ranking_loss_margin,
         ranking_loss_group_index=ranking_loss_group_index,
+        delta_teacher_loss_weight=args.delta_teacher_loss_weight,
     )
     load_model_state(lightning_model, args.checkpoint_path, strict=not args.allow_partial_checkpoint_load)
 
@@ -1577,11 +1682,13 @@ def run_fast_training(args: argparse.Namespace) -> None:
         "pair_logit_gate": args.pair_logit_gate,
         "target_logit_scale": args.target_logit_scale,
         "covariate_logit_scale": args.covariate_logit_scale,
+        "response_base_logit_scale": args.response_base_logit_scale,
         "response_delta_mode": args.response_delta_mode,
         "response_delta_dim": args.response_delta_dim,
         "response_delta_seed": args.response_delta_seed,
         "response_delta_detach": args.response_delta_detach,
         "delta_logit_scale": args.delta_logit_scale,
+        "delta_logit_learnable": args.delta_logit_learnable,
         "aux_covariate_loss_fields": list(args.aux_covariate_loss_fields),
         "aux_covariate_loss_indices": list(aux_covariate_indices),
         "aux_covariate_loss_weight": args.aux_covariate_loss_weight,
@@ -1594,12 +1701,17 @@ def run_fast_training(args: argparse.Namespace) -> None:
         "ranking_loss_margin": args.ranking_loss_margin,
         "ranking_loss_group_field": args.ranking_loss_group_field,
         "ranking_loss_group_index": ranking_loss_group_index,
+        "delta_teacher_loss_weight": args.delta_teacher_loss_weight,
         "cell_prior_mode": args.cell_prior_mode,
         "cell_prior_feature_dim": prior_feature_dim,
         "cell_prior_k": args.cell_prior_k,
         "cell_prior_temperature": args.cell_prior_temperature,
         "cell_prior_logit_scale": args.cell_prior_logit_scale,
         "cell_prior_fixed_logit_scale": args.cell_prior_fixed_logit_scale,
+        "cell_type_llm_mode": args.cell_type_llm_mode,
+        "cell_type_llm_feature_dim": cell_type_feature_dim,
+        "cell_type_llm_embedding_path": args.cell_type_llm_embedding_path_resolved,
+        "cell_type_llm_summary": json_safe(split_summary.get("cell_type_llm", {})),
         "mse_gene_weight_summary": mse_gene_weight_summary,
         "mse_target_mode": args.mse_target_mode,
         "mse_target_topk": args.mse_target_topk,
@@ -1611,12 +1723,16 @@ def run_fast_training(args: argparse.Namespace) -> None:
         "mse_weight_schedule": args.mse_weight_schedule,
         "mse_decay_start_epoch_frac": args.mse_decay_start_epoch_frac,
         "mse_final_weight_multiplier": args.mse_final_weight_multiplier,
+        "mse_pretrain_epochs": args.mse_pretrain_epochs,
+        "mse_pretrain_bce_weight": args.mse_pretrain_bce_weight,
         "effective_key1": args.effective_key1,
         "effective_key2": args.effective_key2,
         "task_head": task_loss_config["task_head"],
         "task_label_key": task_loss_config["task_label_key"],
         "task_mask_key": task_loss_config["task_mask_key"],
         "batch_cov_list": args.batch_cov_list,
+        "use_dose_covariate": bool(args.use_dose_covariate),
+        "dose_covariate_fields": list(args.dose_covariate_fields),
         "covariate_unk_for_unseen": args.covariate_unk_for_unseen,
         "covariate_unk_fields": list(fast_covariate_unknown_indices(args, artifacts)),
         "covariate_unk_dropout": args.covariate_unk_dropout,
@@ -1671,6 +1787,8 @@ def run_fast_training(args: argparse.Namespace) -> None:
         "use_ddi": args.use_ddi,
         "residual_expression": args.residual_expression,
         "init_delta_scale": args.init_delta_scale,
+        "zero_init_delta_head": args.zero_init_delta_head,
+        "control_expression_dropout": args.control_expression_dropout,
         "save_top_k": args.save_top_k,
         "save_last_ckpt": args.save_last_ckpt,
         "logger_backend": "wandb" if args.log_to_wandb else args.logger_backend,
@@ -1850,6 +1968,18 @@ def main() -> None:
     parser.add_argument("--mse-decay-start-epoch-frac", type=float, default=0.4)
     parser.add_argument("--mse-final-weight-multiplier", type=float, default=1.0)
     parser.add_argument(
+        "--mse-pretrain-epochs",
+        type=int,
+        default=0,
+        help="Initial epochs that optimize expression MSE before the normal joint objective; no effect when --no-mse-loss is used.",
+    )
+    parser.add_argument(
+        "--mse-pretrain-bce-weight",
+        type=float,
+        default=0.0,
+        help="Optional BCE weight retained during MSE pretraining epochs.",
+    )
+    parser.add_argument(
         "--active-label-sampling-weight",
         type=float,
         default=1.0,
@@ -1919,7 +2049,18 @@ def main() -> None:
     parser.add_argument(
         "--batch-cov-list",
         nargs="*",
-        default=["machineID_new", "Cell_plate", "Cell", "cell_type", "batch", "pert_time"],
+        default=DEFAULT_BATCH_COVARIATES,
+    )
+    parser.add_argument(
+        "--use-dose-covariate",
+        action="store_true",
+        help="Append perturbation dose covariates to --batch-cov-list. Default is off.",
+    )
+    parser.add_argument(
+        "--dose-covariate-fields",
+        nargs="*",
+        default=DEFAULT_DOSE_COVARIATES,
+        help="Dose covariate fields appended when --use-dose-covariate is set.",
     )
     parser.add_argument(
         "--covariate-unk-for-unseen",
@@ -2011,11 +2152,18 @@ def main() -> None:
     parser.add_argument("--pair-logit-gate", action="store_true")
     parser.add_argument("--target-logit-scale", type=float, default=0.0)
     parser.add_argument("--covariate-logit-scale", type=float, default=0.0)
+    parser.add_argument(
+        "--response-base-logit-scale",
+        type=float,
+        default=1.0,
+        help="Scale the ordinary fusion-hidden response/synergy logits before adding optional delta/graph logit heads.",
+    )
     parser.add_argument("--response-delta-mode", choices=["off", "summary", "gate"], default="off")
     parser.add_argument("--response-delta-dim", type=int, default=64)
     parser.add_argument("--response-delta-seed", type=int, default=31)
     parser.add_argument("--response-delta-detach", action="store_true")
     parser.add_argument("--delta-logit-scale", type=float, default=0.0)
+    parser.add_argument("--delta-logit-learnable", action="store_true")
     parser.add_argument(
         "--aux-covariate-loss-fields",
         nargs="*",
@@ -2035,15 +2183,43 @@ def main() -> None:
     parser.add_argument("--ranking-loss-weight", type=float, default=0.0)
     parser.add_argument("--ranking-loss-margin", type=float, default=0.0)
     parser.add_argument("--ranking-loss-group-field", default="Cell")
+    parser.add_argument(
+        "--delta-teacher-loss-weight",
+        type=float,
+        default=0.0,
+        help="Train the delta response branch on true perturbed-control expression deltas; inference still uses predicted deltas.",
+    )
     parser.add_argument("--cell-prior-mode", choices=["off", "knn_drug"], default="off")
     parser.add_argument("--cell-prior-k", type=int, default=8)
     parser.add_argument("--cell-prior-temperature", type=float, default=0.2)
     parser.add_argument("--cell-prior-chunk-size", type=int, default=512)
     parser.add_argument("--cell-prior-logit-scale", type=float, default=0.0)
     parser.add_argument("--cell-prior-fixed-logit-scale", type=float, default=0.0)
+    parser.add_argument(
+        "--cell-type-llm-mode",
+        choices=["off", "frozen"],
+        default="off",
+        help="Use frozen LLM-derived cell_type text embeddings as continuous covariates.",
+    )
+    parser.add_argument(
+        "--cell-type-llm-embedding-path",
+        default=None,
+        help="Path to cell_type LLM embedding .npz; defaults to data/training_ready/<group>/derived/cell_type_llm_embedding_qwen3_4096.npz.",
+    )
     parser.add_argument("--use-ddi", action="store_true")
     parser.add_argument("--absolute-expression-head", action="store_false", dest="residual_expression")
     parser.add_argument("--init-delta-scale", type=float, default=0.1)
+    parser.add_argument(
+        "--zero-init-delta-head",
+        action="store_true",
+        help="Initialize the expression delta decoder output layer to zero so delta response branches depend on MSE training.",
+    )
+    parser.add_argument(
+        "--control-expression-dropout",
+        type=float,
+        default=0.0,
+        help="Training-only inverted dropout on the control expression input.",
+    )
     parser.add_argument("--log-dir", default="logs")
     parser.add_argument("--checkpoint-dir", default="checkpoints")
     parser.add_argument("--num-workers", type=int, default=4)
@@ -2116,6 +2292,7 @@ def main() -> None:
     )
     parser.add_argument("--compile-model", action="store_true")
     args = parser.parse_args()
+    apply_dose_covariates(args)
     if args.split_strategy == "all_train_subset_test" and not args.skip_test:
         raise ValueError(
             "`all_train_subset_test` uses validation/test subsets drawn from the training anchors; "
@@ -2237,6 +2414,8 @@ def main() -> None:
         "task_label_key": task_loss_config["task_label_key"],
         "task_mask_key": task_loss_config["task_mask_key"],
         "batch_cov_list": args.batch_cov_list,
+        "use_dose_covariate": bool(args.use_dose_covariate),
+        "dose_covariate_fields": list(args.dose_covariate_fields),
         "fusion_mode": args.fusion_mode,
         "perturb_fusion_mode": args.perturb_fusion_mode,
         "num_heads": args.num_heads,

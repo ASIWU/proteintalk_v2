@@ -74,6 +74,8 @@ class FastProteinTalkLightning(pl.LightningModule):
         mse_weight_schedule: str = "constant",
         mse_decay_start_epoch_frac: float = 0.4,
         mse_final_weight_multiplier: float = 1.0,
+        mse_pretrain_epochs: int = 0,
+        mse_pretrain_bce_weight: float = 0.0,
         label_smoothing: float = 0.0,
         aux_covariate_loss_weight: float = 0.0,
         aux_covariate_indices: list[int] | None = None,
@@ -84,6 +86,7 @@ class FastProteinTalkLightning(pl.LightningModule):
         ranking_loss_weight: float = 0.0,
         ranking_loss_margin: float = 0.0,
         ranking_loss_group_index: int | None = None,
+        delta_teacher_loss_weight: float = 0.0,
     ) -> None:
         super().__init__()
         self.model = model
@@ -115,6 +118,12 @@ class FastProteinTalkLightning(pl.LightningModule):
         self.mse_final_weight_multiplier = float(mse_final_weight_multiplier)
         if self.mse_final_weight_multiplier < 0.0:
             raise ValueError("mse_final_weight_multiplier must be non-negative")
+        self.mse_pretrain_epochs = int(mse_pretrain_epochs)
+        if self.mse_pretrain_epochs < 0:
+            raise ValueError("mse_pretrain_epochs must be non-negative")
+        self.mse_pretrain_bce_weight = float(mse_pretrain_bce_weight)
+        if self.mse_pretrain_bce_weight < 0.0:
+            raise ValueError("mse_pretrain_bce_weight must be non-negative")
         self.label_smoothing = float(label_smoothing)
         if not 0.0 <= self.label_smoothing < 1.0:
             raise ValueError("label_smoothing must be in [0, 1)")
@@ -137,6 +146,9 @@ class FastProteinTalkLightning(pl.LightningModule):
             raise ValueError("ranking_loss_weight must be non-negative")
         self.ranking_loss_margin = float(ranking_loss_margin)
         self.ranking_loss_group_index = None if ranking_loss_group_index is None else int(ranking_loss_group_index)
+        self.delta_teacher_loss_weight = float(delta_teacher_loss_weight)
+        if self.delta_teacher_loss_weight < 0.0:
+            raise ValueError("delta_teacher_loss_weight must be non-negative")
         pos_weight_value = 1.0 if positive_weight is None else float(positive_weight)
         self.register_buffer("positive_weight", torch.tensor(pos_weight_value, dtype=torch.float32))
         self.validation_outputs: list[dict[str, torch.Tensor]] = []
@@ -211,6 +223,7 @@ class FastProteinTalkLightning(pl.LightningModule):
         torch.Tensor,
         torch.Tensor,
         torch.Tensor,
+        torch.Tensor,
     ]:
         outputs = self(batch)
         expression_pred, response_logits, synergy_logits = outputs[:3]
@@ -225,15 +238,22 @@ class FastProteinTalkLightning(pl.LightningModule):
         aux_loss = self._aux_covariate_loss(batch, aux_outputs)
         contrastive_loss = self._aux_covariate_contrastive_loss(batch, aux_features)
         ranking_loss = self._ranking_loss(task_logits, label, mask, batch)
-        total = self.bce_weight * loss2
-        if self.have_mse_loss:
-            total = total + self._effective_mse_weight() * loss1
+        delta_teacher_loss = self._delta_teacher_loss(batch, label, mask)
+        mse_pretrain_active = self.have_mse_loss and self.current_epoch < self.mse_pretrain_epochs
+        if mse_pretrain_active:
+            total = self._effective_mse_weight() * loss1 + self.mse_pretrain_bce_weight * self.bce_weight * loss2
+        else:
+            total = self.bce_weight * loss2
+            if self.have_mse_loss:
+                total = total + self._effective_mse_weight() * loss1
         if self.aux_covariate_loss_weight > 0.0:
             total = total + self.aux_covariate_loss_weight * aux_loss
         if self.aux_covariate_contrastive_weight > 0.0:
             total = total + self.aux_covariate_contrastive_weight * contrastive_loss
         if self.ranking_loss_weight > 0.0:
             total = total + self.ranking_loss_weight * ranking_loss
+        if self.delta_teacher_loss_weight > 0.0:
+            total = total + self.delta_teacher_loss_weight * delta_teacher_loss
         total = total + inactive_logits.sum() * 0.0 + expression_pred.sum() * 0.0
         return (
             total,
@@ -242,10 +262,26 @@ class FastProteinTalkLightning(pl.LightningModule):
             aux_loss,
             contrastive_loss,
             ranking_loss,
+            delta_teacher_loss,
             expression_pred,
             response_logits,
             synergy_logits,
         )
+
+    def _delta_teacher_loss(
+        self,
+        batch: dict[str, torch.Tensor],
+        label: torch.Tensor,
+        mask: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.delta_teacher_loss_weight <= 0.0 or not hasattr(self.model, "delta_teacher_logits"):
+            return batch["control_expression"].new_tensor(0.0)
+        teacher_logits = self.model.delta_teacher_logits(batch)
+        if teacher_logits is None:
+            return batch["control_expression"].new_tensor(0.0)
+        response_logits, synergy_logits = teacher_logits
+        logits = synergy_logits.squeeze(-1) if self.task_head == "synergy" else response_logits.squeeze(-1)
+        return self._masked_bce(logits, label, mask)
 
     def _aux_covariate_loss(self, batch: dict[str, torch.Tensor], aux_outputs: list[torch.Tensor]) -> torch.Tensor:
         if self.aux_covariate_loss_weight <= 0.0 or not self.aux_covariate_indices or not aux_outputs:
@@ -521,7 +557,7 @@ class FastProteinTalkLightning(pl.LightningModule):
         return torch.stack(losses).mean()
 
     def training_step(self, batch: dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
-        total, loss1, loss2, aux_loss, contrastive_loss, ranking_loss, _, _, _ = self._losses(batch)
+        total, loss1, loss2, aux_loss, contrastive_loss, ranking_loss, delta_teacher_loss, _, _, _ = self._losses(batch)
         self.log("train/total_loss", total, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
         self.log("train/loss1", loss1, on_step=True, on_epoch=True, prog_bar=False, sync_dist=True)
         self.log("train/loss2", loss2, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
@@ -534,23 +570,34 @@ class FastProteinTalkLightning(pl.LightningModule):
                 prog_bar=False,
                 sync_dist=True,
             )
+        if self.mse_pretrain_epochs > 0:
+            self.log(
+                "train/mse_pretrain_active",
+                self._metric_tensor(float(self.have_mse_loss and self.current_epoch < self.mse_pretrain_epochs)),
+                on_step=False,
+                on_epoch=True,
+                prog_bar=False,
+                sync_dist=True,
+            )
         if self.aux_covariate_loss_weight > 0.0:
             self.log("train/aux_covariate_loss", aux_loss, on_step=True, on_epoch=True, prog_bar=False, sync_dist=True)
         if self.aux_covariate_contrastive_weight > 0.0:
             self.log("train/aux_covariate_contrastive_loss", contrastive_loss, on_step=True, on_epoch=True, prog_bar=False, sync_dist=True)
         if self.ranking_loss_weight > 0.0:
             self.log("train/ranking_loss", ranking_loss, on_step=True, on_epoch=True, prog_bar=False, sync_dist=True)
+        if self.delta_teacher_loss_weight > 0.0:
+            self.log("train/delta_teacher_loss", delta_teacher_loss, on_step=True, on_epoch=True, prog_bar=False, sync_dist=True)
         return total
 
     def validation_step(self, batch: dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
-        total, loss1, loss2, aux_loss, contrastive_loss, ranking_loss, _, response_logits, synergy_logits = self._losses(batch)
-        self._log_eval_losses("val", total, loss1, loss2, aux_loss, contrastive_loss, ranking_loss)
+        total, loss1, loss2, aux_loss, contrastive_loss, ranking_loss, delta_teacher_loss, _, response_logits, synergy_logits = self._losses(batch)
+        self._log_eval_losses("val", total, loss1, loss2, aux_loss, contrastive_loss, ranking_loss, delta_teacher_loss)
         self.validation_outputs.append(self._collect_eval(batch, response_logits, synergy_logits))
         return total
 
     def test_step(self, batch: dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
-        total, loss1, loss2, aux_loss, contrastive_loss, ranking_loss, _, response_logits, synergy_logits = self._losses(batch)
-        self._log_eval_losses("test", total, loss1, loss2, aux_loss, contrastive_loss, ranking_loss)
+        total, loss1, loss2, aux_loss, contrastive_loss, ranking_loss, delta_teacher_loss, _, response_logits, synergy_logits = self._losses(batch)
+        self._log_eval_losses("test", total, loss1, loss2, aux_loss, contrastive_loss, ranking_loss, delta_teacher_loss)
         self.test_outputs.append(self._collect_eval(batch, response_logits, synergy_logits))
         return total
 
@@ -563,6 +610,7 @@ class FastProteinTalkLightning(pl.LightningModule):
         aux_loss: torch.Tensor,
         contrastive_loss: torch.Tensor,
         ranking_loss: torch.Tensor,
+        delta_teacher_loss: torch.Tensor,
     ) -> None:
         self.log(f"{prefix}/total_loss", total, on_epoch=True, prog_bar=True, sync_dist=True)
         self.log(f"{prefix}/loss1", loss1, on_epoch=True, prog_bar=False, sync_dist=True)
@@ -573,6 +621,8 @@ class FastProteinTalkLightning(pl.LightningModule):
             self.log(f"{prefix}/aux_covariate_contrastive_loss", contrastive_loss, on_epoch=True, prog_bar=False, sync_dist=True)
         if self.ranking_loss_weight > 0.0:
             self.log(f"{prefix}/ranking_loss", ranking_loss, on_epoch=True, prog_bar=False, sync_dist=True)
+        if self.delta_teacher_loss_weight > 0.0:
+            self.log(f"{prefix}/delta_teacher_loss", delta_teacher_loss, on_epoch=True, prog_bar=False, sync_dist=True)
 
     def _collect_eval(
         self,

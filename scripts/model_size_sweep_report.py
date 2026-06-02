@@ -138,6 +138,8 @@ def main() -> int:
                 "best_epoch": checkpoint_epoch(manifest.get("best_model_path")),
                 "test_auroc": metric_from_manifest(manifest, "test/auroc"),
                 "test_auprc": metric_from_manifest(manifest, "test/auprc"),
+                "test_auprc_baseline": metric_from_manifest(manifest, "test/task_auprc_baseline"),
+                "test_nauprc": metric_from_manifest(manifest, "test/task_nauprc"),
                 "test_acc": metric_from_manifest(manifest, "test/acc"),
                 "test_count": metric_from_manifest(manifest, "test/task_count"),
                 "mse_weight": manifest.get("mse_weight"),
@@ -188,6 +190,7 @@ def main() -> int:
                 "covariate_unk_dropout": rows[0]["covariate_unk_dropout"],
                 "auroc": summarize([row["test_auroc"] for row in rows if row["test_auroc"] is not None]),
                 "auprc": summarize([row["test_auprc"] for row in rows if row["test_auprc"] is not None]),
+                "nauprc": summarize([row["test_nauprc"] for row in rows if row["test_nauprc"] is not None]),
                 "acc": summarize([row["test_acc"] for row in rows if row["test_acc"] is not None]),
                 "duration_sec": summarize(
                     [float(row["duration_sec"]) for row in rows if row["duration_sec"] is not None]
@@ -203,12 +206,12 @@ def main() -> int:
         "",
         "## Aggregate",
         "",
-        "| task | hidden | expr_latent | cov_dim | params | folds | AUROC mean | AUPRC mean | AUPRC std | avg sec/fold | LR | MSE | cov UNK |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+        "| task | hidden | expr_latent | cov_dim | params | folds | AUROC mean | AUPRC mean | nAUPRC mean | AUPRC std | avg sec/fold | LR | MSE | cov UNK |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for row in aggregates:
         lines.append(
-            "| {task} | {hidden} | {expr} | {cov} | {params} | {folds} | {auroc} | {auprc} | {auprc_std} | {sec} | {lr} | {mse} | {unk} |".format(
+            "| {task} | {hidden} | {expr} | {cov} | {params} | {folds} | {auroc} | {auprc} | {nauprc} | {auprc_std} | {sec} | {lr} | {mse} | {unk} |".format(
                 task=row["task"],
                 hidden=fmt_int(row["hidden_dim"]),
                 expr=fmt_int(row["expression_latent_dim"]),
@@ -217,6 +220,7 @@ def main() -> int:
                 folds=row["fold_count"],
                 auroc=fmt(row["auroc"]["mean"]),
                 auprc=fmt(row["auprc"]["mean"]),
+                nauprc=fmt(row["nauprc"]["mean"]),
                 auprc_std=fmt(row["auprc"]["std"]),
                 sec=fmt(row["duration_sec"]["mean"], 1),
                 lr=fmt(float(row["learning_rate"])) if row["learning_rate"] is not None else "-",
@@ -230,19 +234,21 @@ def main() -> int:
             "",
             "## Fold Detail",
             "",
-            "| task | hidden | fold | AUROC | AUPRC | ACC | best valid | best epoch | sec | manifest |",
-            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+            "| task | hidden | fold | AUROC | AUPRC | baseline | nAUPRC | ACC | best valid | best epoch | sec | manifest |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
         ]
     )
     for row in aggregates:
         for fold_row in row["fold_rows"]:
             lines.append(
-                "| {task} | {hidden} | {fold} | {auroc} | {auprc} | {acc} | {best} | {epoch} | {sec} | `{manifest}` |".format(
+                "| {task} | {hidden} | {fold} | {auroc} | {auprc} | {baseline} | {nauprc} | {acc} | {best} | {epoch} | {sec} | `{manifest}` |".format(
                     task=fold_row["task"],
                     hidden=fmt_int(fold_row["hidden_dim"]),
                     fold=fmt_int(fold_row["fold"]),
                     auroc=fmt(fold_row["test_auroc"]),
                     auprc=fmt(fold_row["test_auprc"]),
+                    baseline=fmt(fold_row["test_auprc_baseline"]),
+                    nauprc=fmt(fold_row["test_nauprc"]),
                     acc=fmt(fold_row["test_acc"]),
                     best=fmt(float(fold_row["best_valid_score"]))
                     if fold_row["best_valid_score"] is not None
