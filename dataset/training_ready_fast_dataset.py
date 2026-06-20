@@ -271,6 +271,7 @@ class FastProteinTalkDataset(Dataset):
         covariate_unk_dropout: float = 0.0,
         prior_feature_matrix: np.ndarray | None = None,
         cell_type_feature_matrix: np.ndarray | None = None,
+        cell_type_llm_feature_matrix: np.ndarray | None = None,
     ) -> None:
         self.artifacts = artifacts
         self.df = artifacts.df
@@ -314,6 +315,17 @@ class FastProteinTalkDataset(Dataset):
             raise ValueError(
                 "cell_type_feature_matrix row count must match feature table; "
                 f"got {self.cell_type_feature_matrix.shape[0]} and {len(self.df)}"
+            )
+        self.cell_type_llm_feature_matrix = (
+            None if cell_type_llm_feature_matrix is None else np.asarray(cell_type_llm_feature_matrix, dtype=np.float32)
+        )
+        self.cell_type_llm_feature_dim = (
+            0 if self.cell_type_llm_feature_matrix is None else int(self.cell_type_llm_feature_matrix.shape[1])
+        )
+        if self.cell_type_llm_feature_matrix is not None and self.cell_type_llm_feature_matrix.shape[0] != len(self.df):
+            raise ValueError(
+                "cell_type_llm_feature_matrix row count must match feature table; "
+                f"got {self.cell_type_llm_feature_matrix.shape[0]} and {len(self.df)}"
             )
         if self.covariate_unk_dropout < 0.0 or self.covariate_unk_dropout >= 1.0:
             raise ValueError("covariate_unk_dropout must be in [0, 1)")
@@ -364,6 +376,7 @@ class FastProteinTalkDataset(Dataset):
             "raw_covariates": self._raw_covariates[perturb_row],
             "prior_features": self._prior_features_for(perturb_row),
             "cell_type_features": self._cell_type_features_for(perturb_row),
+            "cell_type_llm_features": self._cell_type_llm_features_for(perturb_row),
             "ddi_value": np.asarray(self._ddi_values[perturb_row], dtype=np.float32),
             "label1": np.asarray(self._label1[perturb_row], dtype=np.float32),
             "mask1": np.asarray(self._mask1[perturb_row], dtype=np.float32),
@@ -428,6 +441,11 @@ class FastProteinTalkDataset(Dataset):
         if self.cell_type_feature_matrix is None:
             return np.zeros((0,), dtype=np.float32)
         return np.asarray(self.cell_type_feature_matrix[row_idx], dtype=np.float32)
+
+    def _cell_type_llm_features_for(self, row_idx: int) -> np.ndarray:
+        if self.cell_type_llm_feature_matrix is None:
+            return np.zeros((0,), dtype=np.float32)
+        return np.asarray(self.cell_type_llm_feature_matrix[row_idx], dtype=np.float32)
 
     def _build_perturbation_indices(self) -> np.ndarray:
         result = np.zeros((len(self.df), 2), dtype=np.int64)

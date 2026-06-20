@@ -14,6 +14,7 @@ import math
 import numpy as np
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 
 def make_mlp(
@@ -139,6 +140,21 @@ class FastDeltaDrugResponseModel(nn.Module):
         delta_logit_learnable: bool = False,
         aux_covariate_sizes: list[int] | None = None,
         cell_type_feature_dim: int = 0,
+        cell_type_fusion_mode: str = "covariate",
+        cell_type_condition_scale: float = 0.0,
+        cell_type_logit_scale: float = 0.0,
+        cell_type_dropout: float = 0.0,
+        cell_type_llm_feature_dim: int = 0,
+        cell_type_llm_fusion_mode: str = "covariate",
+        cell_type_llm_condition_scale: float = 0.0,
+        cell_type_llm_logit_scale: float = 0.0,
+        cell_type_llm_dropout: float = 0.0,
+        control_drug_interaction_mode: str = "off",
+        control_drug_interaction_scale: float = 0.0,
+        control_drug_logit_scale: float = 0.0,
+        observed_perturb_expression_mode: str = "off",
+        observed_perturb_expression_scale: float = 0.0,
+        observed_perturb_logit_scale: float = 0.0,
         prior_feature_dim: int = 0,
         prior_logit_scale: float = 0.0,
         prior_fixed_logit_scale: float = 0.0,
@@ -242,6 +258,102 @@ class FastDeltaDrugResponseModel(nn.Module):
         self.cell_type_feature_dim = int(cell_type_feature_dim)
         if self.cell_type_feature_dim < 0:
             raise ValueError("cell_type_feature_dim must be non-negative")
+        self.cell_type_fusion_mode = str(cell_type_fusion_mode).lower()
+        if self.cell_type_fusion_mode not in {"off", "covariate", "piece", "film", "interaction", "hybrid"}:
+            raise ValueError("cell_type_fusion_mode must be off, covariate, piece, film, interaction, or hybrid")
+        self.cell_type_condition_scale = float(cell_type_condition_scale)
+        if self.cell_type_condition_scale < 0.0:
+            raise ValueError("cell_type_condition_scale must be non-negative")
+        self.cell_type_logit_scale = float(cell_type_logit_scale)
+        if self.cell_type_logit_scale < 0.0:
+            raise ValueError("cell_type_logit_scale must be non-negative")
+        self.cell_type_dropout = float(cell_type_dropout)
+        if not 0.0 <= self.cell_type_dropout < 1.0:
+            raise ValueError("cell_type_dropout must be in [0, 1)")
+        self.cell_type_in_covariates = self.cell_type_feature_dim > 0 and self.cell_type_fusion_mode == "covariate"
+        self.cell_type_has_conditioner = self.cell_type_feature_dim > 0 and self.cell_type_fusion_mode not in {
+            "off",
+            "covariate",
+        }
+        self.cell_type_add_piece = self.cell_type_has_conditioner and self.cell_type_fusion_mode in {"piece", "hybrid"}
+        self.cell_type_apply_film = self.cell_type_has_conditioner and self.cell_type_fusion_mode in {"film", "hybrid"}
+        self.cell_type_add_interaction = self.cell_type_has_conditioner and self.cell_type_fusion_mode in {
+            "interaction",
+            "hybrid",
+        }
+        self.cell_type_condition_scale_param = (
+            nn.Parameter(torch.tensor(float(cell_type_condition_scale), dtype=torch.float32))
+            if self.cell_type_has_conditioner
+            else None
+        )
+        self.cell_type_llm_feature_dim = int(cell_type_llm_feature_dim)
+        if self.cell_type_llm_feature_dim < 0:
+            raise ValueError("cell_type_llm_feature_dim must be non-negative")
+        self.cell_type_llm_fusion_mode = str(cell_type_llm_fusion_mode).lower()
+        if self.cell_type_llm_fusion_mode not in {"off", "covariate", "piece", "film", "interaction", "hybrid"}:
+            raise ValueError("cell_type_llm_fusion_mode must be off, covariate, piece, film, interaction, or hybrid")
+        self.cell_type_llm_condition_scale = float(cell_type_llm_condition_scale)
+        if self.cell_type_llm_condition_scale < 0.0:
+            raise ValueError("cell_type_llm_condition_scale must be non-negative")
+        self.cell_type_llm_logit_scale = float(cell_type_llm_logit_scale)
+        if self.cell_type_llm_logit_scale < 0.0:
+            raise ValueError("cell_type_llm_logit_scale must be non-negative")
+        self.cell_type_llm_dropout = float(cell_type_llm_dropout)
+        if not 0.0 <= self.cell_type_llm_dropout < 1.0:
+            raise ValueError("cell_type_llm_dropout must be in [0, 1)")
+        self.cell_type_llm_in_covariates = (
+            self.cell_type_llm_feature_dim > 0 and self.cell_type_llm_fusion_mode == "covariate"
+        )
+        self.cell_type_llm_has_conditioner = self.cell_type_llm_feature_dim > 0 and self.cell_type_llm_fusion_mode not in {
+            "off",
+            "covariate",
+        }
+        self.cell_type_llm_add_piece = self.cell_type_llm_has_conditioner and self.cell_type_llm_fusion_mode in {
+            "piece",
+            "hybrid",
+        }
+        self.cell_type_llm_apply_film = self.cell_type_llm_has_conditioner and self.cell_type_llm_fusion_mode in {
+            "film",
+            "hybrid",
+        }
+        self.cell_type_llm_add_interaction = self.cell_type_llm_has_conditioner and self.cell_type_llm_fusion_mode in {
+            "interaction",
+            "hybrid",
+        }
+        self.cell_type_llm_condition_scale_param = (
+            nn.Parameter(torch.tensor(float(cell_type_llm_condition_scale), dtype=torch.float32))
+            if self.cell_type_llm_has_conditioner
+            else None
+        )
+        self.control_drug_interaction_mode = str(control_drug_interaction_mode).lower()
+        if self.control_drug_interaction_mode not in {"off", "full"}:
+            raise ValueError("control_drug_interaction_mode must be off or full")
+        self.control_drug_interaction_enabled = self.control_drug_interaction_mode != "off"
+        self.control_drug_interaction_scale = float(control_drug_interaction_scale)
+        if self.control_drug_interaction_scale < 0.0:
+            raise ValueError("control_drug_interaction_scale must be non-negative")
+        self.control_drug_logit_scale = float(control_drug_logit_scale)
+        if self.control_drug_logit_scale < 0.0:
+            raise ValueError("control_drug_logit_scale must be non-negative")
+        self.observed_perturb_expression_mode = str(observed_perturb_expression_mode).lower()
+        if self.observed_perturb_expression_mode not in {"off", "perturb", "delta"}:
+            raise ValueError("observed_perturb_expression_mode must be off, perturb, or delta")
+        self.observed_perturb_expression_enabled = self.observed_perturb_expression_mode != "off"
+        self.observed_perturb_expression_scale = float(observed_perturb_expression_scale)
+        if self.observed_perturb_expression_scale < 0.0:
+            raise ValueError("observed_perturb_expression_scale must be non-negative")
+        self.observed_perturb_logit_scale = float(observed_perturb_logit_scale)
+        if self.observed_perturb_logit_scale < 0.0:
+            raise ValueError("observed_perturb_logit_scale must be non-negative")
+        self.control_drug_interaction_piece_count = 0
+        if self.control_drug_interaction_enabled:
+            self.control_drug_interaction_piece_count = 4
+            if self.graph_feature_dim > 0:
+                self.control_drug_interaction_piece_count += 2
+            if self.cell_type_has_conditioner:
+                self.control_drug_interaction_piece_count += 3
+            if self.cell_type_llm_has_conditioner:
+                self.control_drug_interaction_piece_count += 3
 
         protein_embedding = np.asarray(protein_embedding, dtype=np.float32)
         self.register_buffer(
@@ -392,6 +504,18 @@ class FastDeltaDrugResponseModel(nn.Module):
             dropout=dropout,
             layers=control_layers,
         )
+        self.observed_perturb_norm = nn.LayerNorm(self.n_genes) if self.observed_perturb_expression_enabled else None
+        self.observed_perturb_encoder = (
+            make_mlp(
+                self.n_genes,
+                expression_latent_dim,
+                hidden_dim,
+                dropout=dropout,
+                layers=control_layers,
+            )
+            if self.observed_perturb_expression_enabled
+            else None
+        )
         drug_encoder_input_dim = drug_embedding_dim + (self.graph_feature_dim if self.graph_drug_concat else 0)
         self.drug_encoder = make_mlp(
             drug_encoder_input_dim,
@@ -429,7 +553,11 @@ class FastDeltaDrugResponseModel(nn.Module):
                 for size in covariate_sizes
             ]
         )
-        cov_input_dim = len(covariate_sizes) * covariate_embedding_dim + self.cell_type_feature_dim
+        cov_input_dim = len(covariate_sizes) * covariate_embedding_dim
+        if self.cell_type_in_covariates:
+            cov_input_dim += self.cell_type_feature_dim
+        if self.cell_type_llm_in_covariates:
+            cov_input_dim += self.cell_type_llm_feature_dim
         if cov_input_dim == 0:
             cov_input_dim = 1
         self.covariate_encoder = make_mlp(
@@ -439,6 +567,60 @@ class FastDeltaDrugResponseModel(nn.Module):
             dropout=dropout,
             layers=2,
         )
+        self.cell_type_input_norm = nn.LayerNorm(self.cell_type_feature_dim) if self.cell_type_has_conditioner else None
+        self.cell_type_encoder = (
+            make_mlp(
+                self.cell_type_feature_dim,
+                hidden_dim,
+                hidden_dim,
+                dropout=dropout,
+                layers=2,
+            )
+            if self.cell_type_has_conditioner
+            else None
+        )
+        self.cell_type_film = (
+            make_mlp(hidden_dim, hidden_dim, hidden_dim * 4, dropout=dropout, layers=2)
+            if self.cell_type_apply_film
+            else None
+        )
+        if self.cell_type_film is not None:
+            _zero_init_last_linear(self.cell_type_film)
+        self.cell_type_interaction_encoder = (
+            make_mlp(hidden_dim * 5, hidden_dim, hidden_dim, dropout=dropout, layers=2)
+            if self.cell_type_add_interaction
+            else None
+        )
+        if self.cell_type_interaction_encoder is not None:
+            _zero_init_last_linear(self.cell_type_interaction_encoder)
+        self.cell_type_llm_input_norm = (
+            nn.LayerNorm(self.cell_type_llm_feature_dim) if self.cell_type_llm_has_conditioner else None
+        )
+        self.cell_type_llm_encoder = (
+            make_mlp(
+                self.cell_type_llm_feature_dim,
+                hidden_dim,
+                hidden_dim,
+                dropout=dropout,
+                layers=2,
+            )
+            if self.cell_type_llm_has_conditioner
+            else None
+        )
+        self.cell_type_llm_film = (
+            make_mlp(hidden_dim, hidden_dim, hidden_dim * 4, dropout=dropout, layers=2)
+            if self.cell_type_llm_apply_film
+            else None
+        )
+        if self.cell_type_llm_film is not None:
+            _zero_init_last_linear(self.cell_type_llm_film)
+        self.cell_type_llm_interaction_encoder = (
+            make_mlp(hidden_dim * 5, hidden_dim, hidden_dim, dropout=dropout, layers=2)
+            if self.cell_type_llm_add_interaction
+            else None
+        )
+        if self.cell_type_llm_interaction_encoder is not None:
+            _zero_init_last_linear(self.cell_type_llm_interaction_encoder)
         self.graph_feature_blocks = self._normalize_graph_feature_blocks(graph_feature_blocks)
         if self.graph_feature_dim > 0 and self.graph_jump_fusion == "selective":
             if not self.graph_feature_blocks:
@@ -489,6 +671,17 @@ class FastDeltaDrugResponseModel(nn.Module):
             if self.prior_feature_dim > 0
             else None
         )
+        self.control_drug_interaction_encoder = (
+            make_mlp(
+                hidden_dim * self.control_drug_interaction_piece_count,
+                hidden_dim,
+                hidden_dim,
+                dropout=dropout,
+                layers=2,
+            )
+            if self.control_drug_interaction_enabled
+            else None
+        )
 
         fusion_input_dim = hidden_dim * (
             4
@@ -496,6 +689,12 @@ class FastDeltaDrugResponseModel(nn.Module):
             + int(self.use_ddi)
             + int(self.graph_feature_dim > 0)
             + int(self.prior_feature_dim > 0)
+            + int(self.cell_type_add_piece)
+            + int(self.cell_type_add_interaction)
+            + int(self.cell_type_llm_add_piece)
+            + int(self.cell_type_llm_add_interaction)
+            + int(self.control_drug_interaction_enabled and self.control_drug_interaction_scale > 0.0)
+            + int(self.observed_perturb_expression_enabled and self.observed_perturb_expression_scale > 0.0)
         )
         self.fusion = make_mlp(
             fusion_input_dim,
@@ -611,6 +810,30 @@ class FastDeltaDrugResponseModel(nn.Module):
             dropout,
             self.prior_logit_scale if self.prior_feature_dim > 0 else 0.0,
         )
+        self.cell_type_response_head, self.cell_type_synergy_head = self._make_aux_logit_heads(
+            hidden_dim,
+            head_hidden,
+            dropout,
+            self.cell_type_logit_scale if self.cell_type_feature_dim > 0 else 0.0,
+        )
+        self.cell_type_llm_response_head, self.cell_type_llm_synergy_head = self._make_aux_logit_heads(
+            hidden_dim,
+            head_hidden,
+            dropout,
+            self.cell_type_llm_logit_scale if self.cell_type_llm_feature_dim > 0 else 0.0,
+        )
+        self.control_drug_response_head, self.control_drug_synergy_head = self._make_aux_logit_heads(
+            hidden_dim,
+            head_hidden,
+            dropout,
+            self.control_drug_logit_scale if self.control_drug_interaction_enabled else 0.0,
+        )
+        self.observed_perturb_response_head, self.observed_perturb_synergy_head = self._make_aux_logit_heads(
+            hidden_dim,
+            head_hidden,
+            dropout,
+            self.observed_perturb_logit_scale if self.observed_perturb_expression_enabled else 0.0,
+        )
         self.aux_covariate_heads = nn.ModuleList(
             [
                 nn.Sequential(
@@ -656,6 +879,7 @@ class FastDeltaDrugResponseModel(nn.Module):
             control_expression = control_expression * keep / (1.0 - self.control_expression_dropout)
         normalized_control = self.control_norm(control_expression)
         control_hidden = self.control_encoder(normalized_control)
+        observed_perturb_hidden = self._encode_observed_perturb_expression(batch, control_expression)
         expression_hidden = control_hidden
         graph_features = batch["graph_features"].float() if self.graph_feature_dim > 0 else None
         graph_feature_mask = batch["graph_feature_mask"].float() if self.graph_feature_dim > 0 else None
@@ -665,9 +889,30 @@ class FastDeltaDrugResponseModel(nn.Module):
             batch["covariates"].long(),
             device=control_expression.device,
             cell_type_features=batch.get("cell_type_features"),
+            cell_type_llm_features=batch.get("cell_type_llm_features"),
+        )
+        cell_type_hidden = self._encode_cell_type_features(
+            batch.get("cell_type_features"),
+            device=control_expression.device,
+            batch_size=control_expression.shape[0],
+        )
+        cell_type_llm_hidden = self._encode_cell_type_llm_features(
+            batch.get("cell_type_llm_features"),
+            device=control_expression.device,
+            batch_size=control_expression.shape[0],
         )
         if self.cell_pair_film is not None and self.cell_pair_film_scale > 0.0:
             pair_hidden = self._apply_cell_pair_film(pair_hidden, control_hidden)
+        if cell_type_hidden is not None and self.cell_type_apply_film and self.cell_type_condition_scale > 0.0:
+            pair_hidden, target_hidden = self._apply_cell_type_film(pair_hidden, target_hidden, cell_type_hidden)
+        if (
+            cell_type_llm_hidden is not None
+            and self.cell_type_llm_apply_film
+            and self.cell_type_llm_condition_scale > 0.0
+        ):
+            pair_hidden, target_hidden = self._apply_cell_type_llm_film(
+                pair_hidden, target_hidden, cell_type_llm_hidden
+            )
         if self.protein_concat_mode != "off":
             pcep_hidden = self._encode_protein_concat(
                 normalized_control,
@@ -687,6 +932,26 @@ class FastDeltaDrugResponseModel(nn.Module):
         pieces = [control_hidden, pair_hidden, target_hidden, covariate_hidden]
         if target_expression_hidden is not None and self.target_expression_fusion_mode == "piece":
             pieces.append(target_expression_hidden)
+        cell_type_interaction_hidden = None
+        if cell_type_hidden is not None and self.cell_type_add_piece:
+            pieces.append(self._scale_cell_type_hidden(cell_type_hidden))
+        if cell_type_hidden is not None and self.cell_type_add_interaction:
+            cell_type_interaction_hidden = self._encode_cell_type_interaction(
+                cell_type_hidden,
+                pair_hidden,
+                target_hidden,
+            )
+            pieces.append(self._scale_cell_type_hidden(cell_type_interaction_hidden))
+        cell_type_llm_interaction_hidden = None
+        if cell_type_llm_hidden is not None and self.cell_type_llm_add_piece:
+            pieces.append(self._scale_cell_type_llm_hidden(cell_type_llm_hidden))
+        if cell_type_llm_hidden is not None and self.cell_type_llm_add_interaction:
+            cell_type_llm_interaction_hidden = self._encode_cell_type_llm_interaction(
+                cell_type_llm_hidden,
+                pair_hidden,
+                target_hidden,
+            )
+            pieces.append(self._scale_cell_type_llm_hidden(cell_type_llm_interaction_hidden))
         graph_hidden = None
         if self.graph_feature_dim > 0:
             if graph_features is None or graph_feature_mask is None:
@@ -705,6 +970,21 @@ class FastDeltaDrugResponseModel(nn.Module):
                 pair_hidden = pair_hidden + self.graph_pair_add_scale * graph_hidden
                 pieces[1] = pair_hidden
             pieces.append(graph_hidden)
+        control_drug_hidden = None
+        if self.control_drug_interaction_encoder is not None:
+            control_drug_hidden = self._encode_control_drug_interaction(
+                control_hidden=control_hidden,
+                pair_hidden=pair_hidden,
+                target_hidden=target_hidden,
+                covariate_hidden=covariate_hidden,
+                graph_hidden=graph_hidden,
+                cell_type_hidden=cell_type_hidden,
+                cell_type_llm_hidden=cell_type_llm_hidden,
+            )
+            if self.control_drug_interaction_scale > 0.0:
+                pieces.append(float(self.control_drug_interaction_scale) * control_drug_hidden)
+        if observed_perturb_hidden is not None and self.observed_perturb_expression_scale > 0.0:
+            pieces.append(float(self.observed_perturb_expression_scale) * observed_perturb_hidden)
         if self.use_ddi:
             if self.ddi_encoder is None:
                 raise RuntimeError("DDI encoder was not initialized")
@@ -781,12 +1061,84 @@ class FastDeltaDrugResponseModel(nn.Module):
                 self.prior_response_head,
                 self.prior_synergy_head,
             )
+        if self.cell_type_feature_dim > 0 and self.cell_type_logit_scale:
+            if cell_type_interaction_hidden is not None:
+                cell_logit_hidden = cell_type_interaction_hidden
+            elif cell_type_hidden is not None:
+                cell_logit_hidden = cell_type_hidden
+            else:
+                cell_logit_hidden = covariate_hidden
+            response_logits, synergy_logits = self._add_aux_logits(
+                response_logits,
+                synergy_logits,
+                cell_logit_hidden,
+                self.cell_type_logit_scale,
+                self.cell_type_response_head,
+                self.cell_type_synergy_head,
+            )
+        if self.cell_type_llm_feature_dim > 0 and self.cell_type_llm_logit_scale:
+            if cell_type_llm_interaction_hidden is not None:
+                cell_type_llm_logit_hidden = cell_type_llm_interaction_hidden
+            elif cell_type_llm_hidden is not None:
+                cell_type_llm_logit_hidden = cell_type_llm_hidden
+            else:
+                cell_type_llm_logit_hidden = covariate_hidden
+            response_logits, synergy_logits = self._add_aux_logits(
+                response_logits,
+                synergy_logits,
+                cell_type_llm_logit_hidden,
+                self.cell_type_llm_logit_scale,
+                self.cell_type_llm_response_head,
+                self.cell_type_llm_synergy_head,
+            )
+        if control_drug_hidden is not None and self.control_drug_logit_scale:
+            response_logits, synergy_logits = self._add_aux_logits(
+                response_logits,
+                synergy_logits,
+                control_drug_hidden,
+                self.control_drug_logit_scale,
+                self.control_drug_response_head,
+                self.control_drug_synergy_head,
+            )
+        if observed_perturb_hidden is not None and self.observed_perturb_logit_scale:
+            response_logits, synergy_logits = self._add_aux_logits(
+                response_logits,
+                synergy_logits,
+                observed_perturb_hidden,
+                self.observed_perturb_logit_scale,
+                self.observed_perturb_response_head,
+                self.observed_perturb_synergy_head,
+            )
         if self.prior_fixed_logit_scale and self.prior_feature_dim > 0 and not self.training:
             fixed_prior_logit = self._fixed_prior_logit(batch.get("prior_features"), control_expression.device)
             response_logits = response_logits + self.prior_fixed_logit_scale * fixed_prior_logit
             synergy_logits = synergy_logits + self.prior_fixed_logit_scale * fixed_prior_logit
         aux_outputs = [head(expression_hidden) for head in self.aux_covariate_heads]
         return expression_pred, response_logits, synergy_logits, aux_outputs, expression_hidden
+
+    def _encode_observed_perturb_expression(
+        self,
+        batch: dict[str, torch.Tensor],
+        control_expression: torch.Tensor,
+    ) -> torch.Tensor | None:
+        if self.observed_perturb_encoder is None or self.observed_perturb_norm is None:
+            return None
+        perturb_expression = batch.get("perturb_expression")
+        if perturb_expression is None:
+            return None
+        perturb_expression = torch.nan_to_num(
+            perturb_expression.to(device=control_expression.device, dtype=torch.float32),
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        )
+        if self.observed_perturb_expression_mode == "delta":
+            signal = perturb_expression - control_expression
+        elif self.observed_perturb_expression_mode == "perturb":
+            signal = perturb_expression
+        else:
+            return None
+        return self.observed_perturb_encoder(self.observed_perturb_norm(signal))
 
     def _make_aux_logit_heads(
         self,
@@ -960,6 +1312,137 @@ class FastDeltaDrugResponseModel(nn.Module):
         gamma, beta = gamma_beta.chunk(2, dim=-1)
         scale = float(self.cell_pair_film_scale)
         return pair_hidden * (1.0 + scale * torch.tanh(gamma)) + scale * beta
+
+    def _apply_cell_type_film(
+        self,
+        pair_hidden: torch.Tensor,
+        target_hidden: torch.Tensor,
+        cell_type_hidden: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.cell_type_film is None:
+            return pair_hidden, target_hidden
+        gamma_pair, beta_pair, gamma_target, beta_target = self.cell_type_film(cell_type_hidden).chunk(4, dim=-1)
+        scale = self._cell_type_condition_scale(dtype=pair_hidden.dtype, device=pair_hidden.device)
+        pair_hidden = pair_hidden * (1.0 + scale * torch.tanh(gamma_pair)) + scale * beta_pair
+        target_hidden = target_hidden * (1.0 + scale * torch.tanh(gamma_target)) + scale * beta_target
+        return pair_hidden, target_hidden
+
+    def _cell_type_condition_scale(self, *, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
+        if self.cell_type_condition_scale_param is None:
+            return torch.tensor(0.0, dtype=dtype, device=device)
+        return torch.clamp(self.cell_type_condition_scale_param.to(device=device, dtype=dtype), min=0.0)
+
+    def _scale_cell_type_hidden(self, hidden: torch.Tensor) -> torch.Tensor:
+        scale = self._cell_type_condition_scale(dtype=hidden.dtype, device=hidden.device)
+        return scale * hidden
+
+    def _encode_cell_type_interaction(
+        self,
+        cell_type_hidden: torch.Tensor,
+        pair_hidden: torch.Tensor,
+        target_hidden: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.cell_type_interaction_encoder is None:
+            raise RuntimeError("cell_type_interaction_encoder was not initialized")
+        interaction = torch.cat(
+            [
+                cell_type_hidden,
+                pair_hidden,
+                target_hidden,
+                cell_type_hidden * pair_hidden,
+                cell_type_hidden * target_hidden,
+            ],
+            dim=-1,
+        )
+        return self.cell_type_interaction_encoder(interaction)
+
+    def _apply_cell_type_llm_film(
+        self,
+        pair_hidden: torch.Tensor,
+        target_hidden: torch.Tensor,
+        cell_type_llm_hidden: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.cell_type_llm_film is None:
+            return pair_hidden, target_hidden
+        gamma_pair, beta_pair, gamma_target, beta_target = self.cell_type_llm_film(cell_type_llm_hidden).chunk(4, dim=-1)
+        scale = self._cell_type_llm_condition_scale(dtype=pair_hidden.dtype, device=pair_hidden.device)
+        pair_hidden = pair_hidden * (1.0 + scale * torch.tanh(gamma_pair)) + scale * beta_pair
+        target_hidden = target_hidden * (1.0 + scale * torch.tanh(gamma_target)) + scale * beta_target
+        return pair_hidden, target_hidden
+
+    def _cell_type_llm_condition_scale(self, *, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
+        if self.cell_type_llm_condition_scale_param is None:
+            return torch.tensor(0.0, dtype=dtype, device=device)
+        return torch.clamp(self.cell_type_llm_condition_scale_param.to(device=device, dtype=dtype), min=0.0)
+
+    def _scale_cell_type_llm_hidden(self, hidden: torch.Tensor) -> torch.Tensor:
+        scale = self._cell_type_llm_condition_scale(dtype=hidden.dtype, device=hidden.device)
+        return scale * hidden
+
+    def _encode_cell_type_llm_interaction(
+        self,
+        cell_type_llm_hidden: torch.Tensor,
+        pair_hidden: torch.Tensor,
+        target_hidden: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.cell_type_llm_interaction_encoder is None:
+            raise RuntimeError("cell_type_llm_interaction_encoder was not initialized")
+        interaction = torch.cat(
+            [
+                cell_type_llm_hidden,
+                pair_hidden,
+                target_hidden,
+                cell_type_llm_hidden * pair_hidden,
+                cell_type_llm_hidden * target_hidden,
+            ],
+            dim=-1,
+        )
+        return self.cell_type_llm_interaction_encoder(interaction)
+
+    def _encode_control_drug_interaction(
+        self,
+        *,
+        control_hidden: torch.Tensor,
+        pair_hidden: torch.Tensor,
+        target_hidden: torch.Tensor,
+        covariate_hidden: torch.Tensor,
+        graph_hidden: torch.Tensor | None,
+        cell_type_hidden: torch.Tensor | None,
+        cell_type_llm_hidden: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if self.control_drug_interaction_encoder is None:
+            raise RuntimeError("control_drug_interaction_encoder was not initialized")
+        pieces = [
+            control_hidden * pair_hidden,
+            control_hidden * target_hidden,
+            pair_hidden * target_hidden,
+            control_hidden * covariate_hidden,
+        ]
+        if self.graph_feature_dim > 0:
+            if graph_hidden is None:
+                graph_hidden = torch.zeros_like(control_hidden)
+            pieces.extend([control_hidden * graph_hidden, pair_hidden * graph_hidden])
+        if self.cell_type_has_conditioner:
+            if cell_type_hidden is None:
+                cell_type_hidden = torch.zeros_like(control_hidden)
+            pieces.extend(
+                [
+                    control_hidden * cell_type_hidden,
+                    pair_hidden * cell_type_hidden,
+                    target_hidden * cell_type_hidden,
+                ]
+            )
+        if self.cell_type_llm_has_conditioner:
+            if cell_type_llm_hidden is None:
+                cell_type_llm_hidden = torch.zeros_like(control_hidden)
+            pieces.extend(
+                [
+                    control_hidden * cell_type_llm_hidden,
+                    pair_hidden * cell_type_llm_hidden,
+                    target_hidden * cell_type_llm_hidden,
+                ]
+            )
+        return self.control_drug_interaction_encoder(torch.cat(pieces, dim=-1))
 
     def _encode_target_expression_context(
         self,
@@ -1184,13 +1667,14 @@ class FastDeltaDrugResponseModel(nn.Module):
         *,
         device: torch.device,
         cell_type_features: torch.Tensor | None = None,
+        cell_type_llm_features: torch.Tensor | None = None,
     ) -> torch.Tensor:
         parts = []
         if self.covariate_embeddings:
             for col_idx, embedding in enumerate(self.covariate_embeddings):
                 value = covariates[:, col_idx].clamp(min=0, max=embedding.num_embeddings - 1)
                 parts.append(embedding(value.to(device)))
-        if self.cell_type_feature_dim > 0:
+        if self.cell_type_in_covariates:
             if cell_type_features is None:
                 cell_type_features = torch.zeros(covariates.shape[0], self.cell_type_feature_dim, device=device)
             cell_type_features = cell_type_features.to(device=device, dtype=torch.float32)
@@ -1200,9 +1684,72 @@ class FastDeltaDrugResponseModel(nn.Module):
                     f"{cell_type_features.shape[-1]} != expected {self.cell_type_feature_dim}"
                 )
             parts.append(torch.nan_to_num(cell_type_features, nan=0.0, posinf=0.0, neginf=0.0))
+        if self.cell_type_llm_in_covariates:
+            if cell_type_llm_features is None:
+                cell_type_llm_features = torch.zeros(
+                    covariates.shape[0], self.cell_type_llm_feature_dim, device=device
+                )
+            cell_type_llm_features = cell_type_llm_features.to(device=device, dtype=torch.float32)
+            if cell_type_llm_features.shape[-1] != self.cell_type_llm_feature_dim:
+                raise ValueError(
+                    "cell_type_llm_features last dimension "
+                    f"{cell_type_llm_features.shape[-1]} != expected {self.cell_type_llm_feature_dim}"
+                )
+            parts.append(torch.nan_to_num(cell_type_llm_features, nan=0.0, posinf=0.0, neginf=0.0))
         if not parts:
             return torch.zeros(covariates.shape[0], self.hidden_dim, device=device)
         return self.covariate_encoder(torch.cat(parts, dim=-1))
+
+    def _encode_cell_type_features(
+        self,
+        cell_type_features: torch.Tensor | None,
+        *,
+        device: torch.device,
+        batch_size: int,
+    ) -> torch.Tensor | None:
+        if not self.cell_type_has_conditioner:
+            return None
+        if self.cell_type_encoder is None or self.cell_type_input_norm is None:
+            raise RuntimeError("cell-type conditioner was not initialized")
+        if cell_type_features is None:
+            cell_type_features = torch.zeros(batch_size, self.cell_type_feature_dim, device=device)
+        cell_type_features = cell_type_features.to(device=device, dtype=torch.float32)
+        if cell_type_features.shape[-1] != self.cell_type_feature_dim:
+            raise ValueError(
+                "cell_type_features last dimension "
+                f"{cell_type_features.shape[-1]} != expected {self.cell_type_feature_dim}"
+            )
+        # The LLM embedding itself is a frozen input artifact. Only this projector and downstream gates train.
+        cell_type_features = torch.nan_to_num(cell_type_features.detach(), nan=0.0, posinf=0.0, neginf=0.0)
+        if self.training and self.cell_type_dropout > 0.0:
+            cell_type_features = F.dropout(cell_type_features, p=self.cell_type_dropout, training=True)
+        return self.cell_type_encoder(self.cell_type_input_norm(cell_type_features))
+
+    def _encode_cell_type_llm_features(
+        self,
+        cell_type_llm_features: torch.Tensor | None,
+        *,
+        device: torch.device,
+        batch_size: int,
+    ) -> torch.Tensor | None:
+        if not self.cell_type_llm_has_conditioner:
+            return None
+        if self.cell_type_llm_encoder is None or self.cell_type_llm_input_norm is None:
+            raise RuntimeError("cell-type LLM conditioner was not initialized")
+        if cell_type_llm_features is None:
+            cell_type_llm_features = torch.zeros(batch_size, self.cell_type_llm_feature_dim, device=device)
+        cell_type_llm_features = cell_type_llm_features.to(device=device, dtype=torch.float32)
+        if cell_type_llm_features.shape[-1] != self.cell_type_llm_feature_dim:
+            raise ValueError(
+                "cell_type_llm_features last dimension "
+                f"{cell_type_llm_features.shape[-1]} != expected {self.cell_type_llm_feature_dim}"
+            )
+        cell_type_llm_features = torch.nan_to_num(
+            cell_type_llm_features.detach(), nan=0.0, posinf=0.0, neginf=0.0
+        )
+        if self.training and self.cell_type_llm_dropout > 0.0:
+            cell_type_llm_features = F.dropout(cell_type_llm_features, p=self.cell_type_llm_dropout, training=True)
+        return self.cell_type_llm_encoder(self.cell_type_llm_input_norm(cell_type_llm_features))
 
     def _normalize_graph_feature_blocks(self, blocks: list[dict[str, int | str]] | None) -> list[dict[str, int | str]]:
         if not blocks or self.graph_feature_dim <= 0:

@@ -10,6 +10,7 @@ set -euo pipefail
 #   scripts/exp_06_double_pert_pair_5fold.sh
 #   scripts/exp_07_extra_single_all_train_infer.sh
 #   scripts/exp_08_extra_double_all_train_infer.sh
+#   scripts/exp_09_unified_all_train_valid_oracle.sh
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${REPO_ROOT}"

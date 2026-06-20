@@ -209,6 +209,21 @@ def build_pert_dose_value_to_index(values: list[str]) -> dict[str, str]:
     return mapping
 
 
+def validate_clipped_dose_series(series: pd.Series, *, task_name: str, field: str) -> None:
+    numbers = pd.to_numeric(series, errors="coerce")
+    numeric_mask = numbers.notna()
+    invalid_mask = numeric_mask & ((numbers < 0) | (numbers > 10))
+    if not invalid_mask.any():
+        return
+    examples = [
+        {"row_index": int(index), "value": float(numbers.loc[index])}
+        for index in numbers.loc[invalid_mask].index[:10]
+    ]
+    raise ValueError(
+        f"{task_name}: {field} contains numeric dose values outside the clipped [0, 10] range: {examples}"
+    )
+
+
 def is_non_empty_series(series: pd.Series) -> pd.Series:
     return (~series.isna()) & (series.astype("string").fillna("").str.strip() != "")
 
@@ -333,6 +348,8 @@ def build_stage2_global_meta(
             if field not in info_df.columns:
                 normalized_values[field].append("no")
                 continue
+            if field in {"pert_dose1", "pert_dose2"}:
+                validate_clipped_dose_series(info_df[field], task_name=task_name, field=field)
             normalized_values[field].extend(
                 canonicalize_discrete_value(field, value) for value in info_df[field].tolist()
             )
@@ -374,8 +391,8 @@ def build_stage2_global_meta(
             "cell_type": "uppercase, replace punctuation/space/hyphen with `_`, collapse repeated `_`",
             "batch": "uppercase, replace punctuation/space/hyphen with `_`, collapse repeated `_`",
             "pert_time": "numeric values use compact float text; non-numeric values fall back to uppercase canonical text",
-            "pert_dose1": "shared with pert_dose2; numeric values use compact float text and map to stringified ceil(dose); missing values map to `no`, whose index is string(max_numeric_index + 1)",
-            "pert_dose2": "shared with pert_dose1; numeric values use compact float text and map to stringified ceil(dose); missing values map to `no`, whose index is string(max_numeric_index + 1)",
+            "pert_dose1": "shared with pert_dose2; stage-1 numeric dose must be clipped into [0, 10], numeric values use compact float text and map to stringified ceil(dose); missing values map to `no`, whose index is string(max_numeric_index + 1)",
+            "pert_dose2": "shared with pert_dose1; stage-1 numeric dose must be clipped into [0, 10], numeric values use compact float text and map to stringified ceil(dose); missing values map to `no`, whose index is string(max_numeric_index + 1)",
         },
         "special_values": {
             "protein_index": {"control": protein_index["control"], "no": protein_index["no"]},

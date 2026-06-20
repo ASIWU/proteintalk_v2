@@ -41,7 +41,8 @@ import pandas as pd
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RAW_ROOT = REPO_ROOT / "data" / "rawdata"
-EXTRA_DOUBLE_UPDATE_ROOT = RAW_ROOT / "update_0526" / "extra_doubledrug"
+EXTRA_SINGLE_UPDATE_ROOT = RAW_ROOT / "update_0527" / "extra_singledrug"
+EXTRA_DOUBLE_UPDATE_ROOT = RAW_ROOT / "update_0527" / "extra_doubledrug"
 DEFAULT_OUTPUT_ROOT = REPO_ROOT / "data" / "standardized"
 
 STANDARD_INFO_COLUMNS = [
@@ -164,6 +165,10 @@ def clean_nullable_string(series: pd.Series) -> pd.Series:
 
 def clean_numeric(series: pd.Series) -> pd.Series:
     return pd.to_numeric(series, errors="coerce")
+
+
+def clean_dose(series: pd.Series) -> pd.Series:
+    return clean_numeric(series).clip(upper=10)
 
 
 def json_list_string(items: list[str]) -> str:
@@ -926,7 +931,7 @@ def standardize_main_singledrug(task_dir: Path) -> TaskResult:
     standard["pert_id2"] = standard["pert_id1"]
     standard["batch"] = clean_nullable_string(info_raw["batch"])
     standard["pert_time"] = clean_numeric(info_raw["pert_time"])
-    standard["pert_dose1"] = clean_numeric(info_raw["pert_dose"])
+    standard["pert_dose1"] = clean_dose(info_raw["pert_dose"])
     standard["pert_dose2"] = np.nan
     standard["PRISM1st_label_total"] = clean_nullable_string(info_raw["PRISM1st_label_total"])
     standard["PRISM2nd_label_total"] = ""
@@ -1102,8 +1107,8 @@ def standardize_main_doubledrug(task_dir: Path, main_single_maps: dict[str, dict
     standard["pert_id2"] = clean_nullable_string(info_raw["pert_id2"].astype("string"))
     standard["batch"] = clean_nullable_string(info_raw["batch"])
     standard["pert_time"] = clean_numeric(info_raw["pert_time"])
-    standard["pert_dose1"] = clean_numeric(info_raw["pert_dose1"])
-    standard["pert_dose2"] = clean_numeric(info_raw["pert_dose2"])
+    standard["pert_dose1"] = clean_dose(info_raw["pert_dose1"])
+    standard["pert_dose2"] = clean_dose(info_raw["pert_dose2"])
     standard["PRISM1st_label_total"] = clean_nullable_string(info_raw["PRISM1st_label_total"])
     standard["PRISM2nd_label_total"] = clean_nullable_string(info_raw["PRISM2nd_label_total"])
     standard["instrument"] = clean_nullable_string(info_raw["machine_ID_detail"])
@@ -1284,7 +1289,7 @@ def standardize_extra_baseline(task_dir: Path) -> TaskResult:
     standard["pert_id2"] = "control"
     standard["batch"] = clean_nullable_string(merged["batch"])
     standard["pert_time"] = clean_numeric(merged["pert_time"]).fillna(0)
-    standard["pert_dose1"] = clean_numeric(merged["pert_dose"]).fillna(0)
+    standard["pert_dose1"] = clean_dose(merged["pert_dose"]).fillna(0)
     standard["pert_dose2"] = np.nan
     standard["PRISM1st_label_total"] = clean_nullable_string(merged["PRISM1st_label_total"])
     standard["PRISM2nd_label_total"] = ""
@@ -1408,7 +1413,7 @@ def standardize_extra_single_task(
     name_to_pert: dict[str, str],
     target_maps: dict[str, dict[str, list[str]]],
 ) -> TaskResult:
-    info_path = RAW_ROOT / "extra_singledrug" / file_name
+    info_path = EXTRA_SINGLE_UPDATE_ROOT / file_name
     raw = pd.read_csv(info_path, low_memory=False)
     standard = default_standard_frame(pd.Series(make_generated_sample_ids(task_name, len(raw))))
     standard["machineID_new"] = clean_nullable_string(raw["machineID_new"])
@@ -1420,7 +1425,7 @@ def standardize_extra_single_task(
     standard["pert_id2"] = standard["pert_id1"]
     standard["batch"] = clean_nullable_string(raw["batch"])
     standard["pert_time"] = clean_numeric(raw["pert_time"])
-    standard["pert_dose1"] = clean_numeric(raw["pert_dose"])
+    standard["pert_dose1"] = clean_dose(raw["pert_dose"])
     standard["pert_dose2"] = np.nan
     standard["PRISM1st_label_total"] = clean_nullable_string(raw["PRISM1st_label_total"])
     standard["PRISM2nd_label_total"] = clean_nullable_string(raw["PRISM2nd_label_total"])
@@ -1701,8 +1706,19 @@ def standardize_extra_double_task(
     standard["pert_id2"] = [item[0] for item in resolved_2]
     standard["batch"] = clean_nullable_string(raw["batch"])
     standard["pert_time"] = clean_numeric(raw["pert_time"])
-    standard["pert_dose1"] = clean_numeric(raw["pert_dose"])
-    standard["pert_dose2"] = clean_numeric(raw["pert_dose"])
+    if {"pert_dose1", "pert_dose2"}.issubset(raw.columns):
+        standard["pert_dose1"] = clean_dose(raw["pert_dose1"])
+        standard["pert_dose2"] = clean_dose(raw["pert_dose2"])
+        dose_mapping_rule = "raw independent `pert_dose1` and `pert_dose2`, numeric values clipped to <=10"
+    elif "pert_dose" in raw.columns:
+        shared_dose = clean_dose(raw["pert_dose"])
+        standard["pert_dose1"] = shared_dose
+        standard["pert_dose2"] = shared_dose
+        dose_mapping_rule = "legacy raw single `pert_dose` copied to both slots, numeric values clipped to <=10"
+    else:
+        standard["pert_dose1"] = np.nan
+        standard["pert_dose2"] = np.nan
+        dose_mapping_rule = "missing raw dose columns; both slots left missing"
     standard["PRISM1st_label_total"] = "non-responsive"
     standard["PRISM2nd_label_total"] = ""
     standard["instrument"] = clean_nullable_string(raw["machineID_new"])
@@ -1833,6 +1849,8 @@ def standardize_extra_double_task(
             "sample_id": "generated_from_task_name_and_row_index",
             "pert_id1": "existing pert_id by smiles/name > unified external id derived from explicit id / smiles / name",
             "pert_id2": "existing pert_id by smiles/name > unified external id derived from explicit id / smiles / name",
+            "pert_dose1": dose_mapping_rule,
+            "pert_dose2": dose_mapping_rule,
             "drugname": f"{name_columns_1[0]} || {name_columns_2[0]}",
             "smiles": "Smiles*_with_chiral > smiles* > Smiles*_no_chiral",
             "control": "matched from ptv3 control pool",
@@ -2054,14 +2072,14 @@ def standardize_ptv1(task_dir: Path) -> TaskResult:
         lambda row: choose_first_non_empty(row.get("Cell.Line.name"), row.get("protein_plate")),
         axis=1,
     )
-    standard["cell_type"] = ""
+    standard["cell_type"] = "BREAST"
     standard["pert_id1"] = info_raw["pert_id_clean"]
     standard["pert_id2"] = info_raw["Anchor_id_clean"]
     standard = copy_pert_id1_to_blank_pert_id2(standard)
     standard["batch"] = "no"
     standard["pert_time"] = clean_numeric(info_raw["pert_time"])
-    library_dose = clean_numeric(info_raw["Library_dose"])
-    anchor_dose = clean_numeric(info_raw["Anchor_dose"])
+    library_dose = clean_dose(info_raw["Library_dose"])
+    anchor_dose = clean_dose(info_raw["Anchor_dose"])
     control_mask = standard["pert_time"].eq(0)
     standard["pert_dose1"] = library_dose.where(~control_mask, library_dose.fillna(0))
     standard["pert_dose2"] = anchor_dose.where(~control_mask, anchor_dose.fillna(0))
@@ -2290,7 +2308,7 @@ def standardize_ptv1_extra_singledrug(
     standard["machineID_new"] = ""
     standard["Cell_plate"] = clean_nullable_string(selected["cell"])
     standard["Cell"] = clean_nullable_string(selected["cell"])
-    standard["cell_type"] = ""
+    standard["cell_type"] = "BREAST"
     standard["pert_id1"] = clean_placeholder_string(selected["E115_id"])
     standard["pert_id2"] = standard["pert_id1"]
     standard["batch"] = "no"
@@ -2499,12 +2517,12 @@ def main() -> None:
     control_pool = build_control_pool(main_single_info, main_double_info, extra_baseline_info)
 
     extra_single_specs = [
-        ("ptv3_extra_singledrug_mat1_480_faims", "20260413ptv3_PRISM1st_validation_phenotype_mat1_480_faims_add_PRISM2nd_label_dup.csv"),
-        ("ptv3_extra_singledrug_mat1_qe", "20260413ptv3_PRISM1st_validation_phenotype_mat1_qe_add_PRISM2nd_label_dup.csv"),
-        ("ptv3_extra_singledrug_mat2_480_faims", "20260413ptv3_PRISM1st_validation_phenotype_mat2_480_faims_add_PRISM2nd_label_dup.csv"),
-        ("ptv3_extra_singledrug_mat2_qe", "20260413ptv3_PRISM1st_validation_phenotype_mat2_qe_add_PRISM2nd_label_dup.csv"),
-        ("ptv3_extra_singledrug_mat3_qe", "20260413ptv3_PRISM1st_validation_phenotype_mat3_add_PRISM2nd_label_dup.csv"),
-        ("ptv3_extra_singledrug_mat4_qe", "20260413ptv3_PRISM1st_validation_phenotype_mat4_add_PRISM2nd_label_dup.csv"),
+        ("ptv3_extra_singledrug_mat1_480_faims", "260527ptv3_PRISM1st_validation_phenotype_mat1_480_faims_add_PRISM2nd_label.csv"),
+        ("ptv3_extra_singledrug_mat1_qe", "260527ptv3_PRISM1st_validation_phenotype_mat1_qe_add_PRISM2nd_label.csv"),
+        ("ptv3_extra_singledrug_mat2_480_faims", "260527ptv3_PRISM1st_validation_phenotype_mat2_480_faims_add_PRISM2nd_label.csv"),
+        ("ptv3_extra_singledrug_mat2_qe", "260527ptv3_PRISM1st_validation_phenotype_mat2_qe_add_PRISM2nd_label.csv"),
+        ("ptv3_extra_singledrug_mat3_qe", "260527ptv3_PRISM1st_validation_phenotype_mat3_add_PRISM2nd_label.csv"),
+        ("ptv3_extra_singledrug_mat4_qe", "260527ptv3_PRISM1st_validation_phenotype_mat4_add_PRISM2nd_label.csv"),
     ]
     for task_name, file_name in extra_single_specs:
         task_dir = ensure_dir(ptv3_tasks_root / task_name)
@@ -2520,9 +2538,9 @@ def main() -> None:
         task_results.append(task_result)
 
     extra_double_specs = [
-        ("ptv3_extra_doubledrug_guomics", "260525ptv3_Guomics_drug_combo_unique_with_smlies_test_label.csv", "guomics"),
-        ("ptv3_extra_doubledrug_nc", "260525nc_drugComb_info_unique_with_smiles_test_label.csv", "nc"),
-        ("ptv3_extra_doubledrug_nature", "260525nature_drugComb_info_unique_with_smiles_test_label.csv", "nature"),
+        ("ptv3_extra_doubledrug_guomics", "260527ptv3_Guomics_drug_combo_all_with_smlies_test_label_dose_final.csv", "guomics"),
+        ("ptv3_extra_doubledrug_nc", "260527nc_drugCombo_info_all_with_smlies_test_label_dose_final.csv", "nc"),
+        ("ptv3_extra_doubledrug_nature", "260527nature_drugCombo_info_all_with_smlies_test_label_dose_final.csv", "nature"),
     ]
     for task_name, file_name, file_kind in extra_double_specs:
         task_dir = ensure_dir(ptv3_tasks_root / task_name)
