@@ -4,12 +4,15 @@ set -euo pipefail
 EXPERIMENT_SET_NAME="single_cell_5fold"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ptv3_experiment_common.sh"
 
+TASK_NAME="${TASK_NAME:-ptv3_main_singledrug}"
+SPLIT_STRATEGY_PREFIX="${SPLIT_STRATEGY_PREFIX:-cell_5fold_fold}"
+
 ptv3_print_settings "Baseline4 single-drug 5-fold split on cell"
 ptv3_run_preflight
 
 for fold in "${FOLD_LIST[@]}"; do
   ptv3_train "${EXP_PREFIX}_single_cell_fold${fold}" \
-    ptv3_main_singledrug "cell_5fold_fold${fold}" response
+    "${TASK_NAME}" "${SPLIT_STRATEGY_PREFIX}${fold}" response
 done
 
 ptv3_done

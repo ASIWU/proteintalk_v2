@@ -13,6 +13,8 @@ from typing import Any
 import numpy as np
 from scipy import sparse
 
+from utils.npy_io import safe_np_load
+
 
 def _source_signature(path: str | Path) -> dict[str, Any]:
     resolved = Path(path).resolve()
@@ -82,7 +84,7 @@ def _random_projection(in_dim: int, out_dim: int, *, seed: int) -> np.ndarray:
 
 
 def _csr_from_npy(path: str | Path, *, name: str) -> sparse.csr_matrix:
-    matrix = np.load(path, mmap_mode="r")
+    matrix = safe_np_load(path, mmap_mode="r")
     dense = np.asarray(matrix, dtype=np.float32)
     csr = sparse.csr_matrix(dense)
     csr.eliminate_zeros()
@@ -126,7 +128,7 @@ def _sparse_stats(matrix: sparse.csr_matrix) -> np.ndarray:
 
 
 def _dense_row_normalized_context(matrix_path: str | Path, embedding: np.ndarray, *, chunk_size: int = 512) -> tuple[np.ndarray, np.ndarray]:
-    matrix = np.load(matrix_path, mmap_mode="r")
+    matrix = safe_np_load(matrix_path, mmap_mode="r")
     if matrix.shape[1] != embedding.shape[0]:
         raise ValueError(f"DDI matrix shape {matrix.shape} is incompatible with embedding {embedding.shape}")
     context = np.zeros((matrix.shape[0], embedding.shape[1]), dtype=np.float32)
@@ -202,12 +204,12 @@ def build_or_load_graph_features(
         "drug_embedding_shape": list(map(int, drug_embedding.shape)),
     }
     if not force_rebuild and (existing_meta := _cache_matches(feature_path, meta_path, expected)) is not None:
-        return np.load(feature_path, mmap_mode="r"), existing_meta
+        return safe_np_load(feature_path, mmap_mode="r"), existing_meta
 
     lock_path = cache_dir / f"{feature_path.name}.lock"
     with _exclusive_file_lock(lock_path):
         if not force_rebuild and (existing_meta := _cache_matches(feature_path, meta_path, expected)) is not None:
-            return np.load(feature_path, mmap_mode="r"), existing_meta
+            return safe_np_load(feature_path, mmap_mode="r"), existing_meta
 
         protein_embedding = np.asarray(protein_embedding, dtype=np.float32)
         drug_embedding = np.asarray(drug_embedding, dtype=np.float32)
@@ -302,4 +304,4 @@ def build_or_load_graph_features(
             ),
         }
         _write_meta_atomic(meta_path, meta)
-        return np.load(feature_path, mmap_mode="r"), meta
+        return safe_np_load(feature_path, mmap_mode="r"), meta

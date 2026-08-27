@@ -7,8 +7,8 @@ Evidence checked:
 - Training prefix: `20260603_llm_dose_exp01params_wograph_v1`
 - Checkpoints: `checkpoints/20260603_llm_dose_exp01params_wograph_v1_exp05_single_no_graph_5fold_single_no_graph_fold*/run_manifest.json`
 - Report markdown: `logs/20260603_llm_dose_exp01params_wograph_v1_cell_drug_dose_time_eval.md`
-- Report CSV: `outputs/20260603_llm_dose_exp01params_wograph_v1_cell_drug_dose_time_eval.csv`
-- Report JSON: `outputs/20260603_llm_dose_exp01params_wograph_v1_cell_drug_dose_time_eval.json`
+- Report CSV: `outputs/2026-06/2026-06-03/20260603_llm_dose_exp01params_wograph_v1_cell_drug_dose_time_eval.csv`
+- Report JSON: `outputs/2026-06/2026-06-03/20260603_llm_dose_exp01params_wograph_v1_cell_drug_dose_time_eval.json`
 - Runtime summary: `logs/20260603_llm_dose_exp01params_wograph_v1_runtime_summary.tsv`
 
 Findings:

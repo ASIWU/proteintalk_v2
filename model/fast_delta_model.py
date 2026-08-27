@@ -138,6 +138,12 @@ class FastDeltaDrugResponseModel(nn.Module):
         response_delta_detach: bool = False,
         delta_logit_scale: float = 0.0,
         delta_logit_learnable: bool = False,
+        response_trajectory_mode: str = "off",
+        response_trajectory_dim: int = 64,
+        response_trajectory_seed: int = 37,
+        response_trajectory_detach: bool = False,
+        trajectory_logit_scale: float = 0.0,
+        trajectory_logit_learnable: bool = False,
         aux_covariate_sizes: list[int] | None = None,
         cell_type_feature_dim: int = 0,
         cell_type_fusion_mode: str = "covariate",
@@ -246,6 +252,26 @@ class FastDeltaDrugResponseModel(nn.Module):
         self.delta_logit_scale_param = (
             nn.Parameter(torch.tensor(float(delta_logit_scale), dtype=torch.float32))
             if self.delta_logit_learnable
+            else None
+        )
+        self.response_trajectory_mode = str(response_trajectory_mode).lower()
+        if self.response_trajectory_mode not in {"off", "summary", "drug", "gate"}:
+            raise ValueError("response_trajectory_mode must be off, summary, drug, or gate")
+        self.response_trajectory_dim = int(response_trajectory_dim)
+        if self.response_trajectory_mode != "off" and self.response_trajectory_dim <= 0:
+            raise ValueError("response_trajectory_dim must be positive when response trajectory is enabled")
+        self.response_trajectory_detach = bool(response_trajectory_detach)
+        self.trajectory_logit_scale = float(trajectory_logit_scale)
+        self.trajectory_logit_learnable = bool(trajectory_logit_learnable)
+        if self.trajectory_logit_scale < 0.0:
+            raise ValueError("trajectory_logit_scale must be non-negative")
+        if self.response_trajectory_mode == "off" and self.trajectory_logit_scale:
+            raise ValueError("trajectory_logit_scale requires response_trajectory_mode to be summary, drug, or gate")
+        if self.trajectory_logit_learnable and self.response_trajectory_mode == "off":
+            raise ValueError("trajectory_logit_learnable requires response_trajectory_mode to be summary, drug, or gate")
+        self.trajectory_logit_scale_param = (
+            nn.Parameter(torch.tensor(float(trajectory_logit_scale), dtype=torch.float32))
+            if self.trajectory_logit_learnable
             else None
         )
         self.prior_feature_dim = int(prior_feature_dim)
@@ -769,6 +795,62 @@ class FastDeltaDrugResponseModel(nn.Module):
             self.delta_response_head = None
             self.delta_synergy_head = None
             self.delta_logit_gate_head = None
+        if self.response_trajectory_mode != "off":
+            response_trajectory_projection = _random_projection(
+                self.n_genes,
+                self.response_trajectory_dim,
+                seed=response_trajectory_seed,
+            )
+            self.register_buffer(
+                "response_trajectory_projection",
+                torch.tensor(response_trajectory_projection, dtype=torch.float32),
+                persistent=False,
+            )
+            self.response_trajectory_encoder = make_mlp(
+                self.response_trajectory_dim * 3,
+                hidden_dim,
+                hidden_dim,
+                dropout=dropout,
+                layers=2,
+            )
+            self.response_trajectory_pair_encoder = (
+                make_mlp(
+                    hidden_dim * 3,
+                    hidden_dim,
+                    hidden_dim,
+                    dropout=dropout,
+                    layers=2,
+                )
+                if self.response_trajectory_mode in {"drug", "gate"}
+                else None
+            )
+            self.trajectory_response_head, self.trajectory_synergy_head = self._make_aux_logit_heads(
+                hidden_dim,
+                head_hidden,
+                dropout,
+                self.trajectory_logit_scale
+                if not self.trajectory_logit_learnable
+                else max(self.trajectory_logit_scale, 1e-8),
+            )
+            self.trajectory_logit_gate_head = (
+                nn.Sequential(
+                    nn.LayerNorm(hidden_dim),
+                    nn.Linear(hidden_dim, head_hidden),
+                    nn.GELU(),
+                    nn.Dropout(dropout),
+                    nn.Linear(head_hidden, 1),
+                )
+                if (self.trajectory_logit_scale or self.trajectory_logit_learnable)
+                and self.response_trajectory_mode == "gate"
+                else None
+            )
+        else:
+            self.register_buffer("response_trajectory_projection", torch.empty(0), persistent=False)
+            self.response_trajectory_encoder = None
+            self.response_trajectory_pair_encoder = None
+            self.trajectory_response_head = None
+            self.trajectory_synergy_head = None
+            self.trajectory_logit_gate_head = None
         self.control_response_head, self.control_synergy_head = self._make_aux_logit_heads(
             hidden_dim,
             head_hidden,
@@ -1005,9 +1087,17 @@ class FastDeltaDrugResponseModel(nn.Module):
         else:
             expression_pred = delta
         delta_hidden = None
+        delta_signal = expression_pred - control_expression if self.residual_expression else expression_pred
         if self.response_delta_mode != "off":
-            delta_signal = expression_pred - control_expression if self.residual_expression else expression_pred
             delta_hidden = self._encode_response_delta(delta_signal)
+        trajectory_hidden = None
+        if self.response_trajectory_mode != "off":
+            trajectory_hidden = self._encode_response_trajectory(
+                control_expression=control_expression,
+                expression_pred=expression_pred,
+                delta_signal=delta_signal,
+                pair_hidden=pair_hidden,
+            )
         base_scale = float(self.response_base_logit_scale)
         response_logits = base_scale * self.response_head(hidden)
         synergy_logits = base_scale * self.synergy_head(hidden)
@@ -1015,6 +1105,12 @@ class FastDeltaDrugResponseModel(nn.Module):
             response_logits,
             synergy_logits,
             delta_hidden,
+            hidden,
+        )
+        response_logits, synergy_logits = self._add_trajectory_logits(
+            response_logits,
+            synergy_logits,
+            trajectory_hidden,
             hidden,
         )
         response_logits, synergy_logits = self._add_aux_logits(
@@ -1209,6 +1305,36 @@ class FastDeltaDrugResponseModel(nn.Module):
         projected = delta_signal @ projection
         return self.response_delta_encoder(projected)
 
+    def _project_trajectory_signal(self, signal: torch.Tensor) -> torch.Tensor:
+        if self.response_trajectory_projection.numel() == 0:
+            raise RuntimeError("response trajectory projection was not initialized")
+        signal = torch.nan_to_num(signal.float(), nan=0.0, posinf=0.0, neginf=0.0)
+        if self.response_trajectory_detach:
+            signal = signal.detach()
+        signal = F.layer_norm(signal, (signal.shape[-1],))
+        projection = self.response_trajectory_projection.to(device=signal.device, dtype=signal.dtype)
+        return signal @ projection
+
+    def _encode_response_trajectory(
+        self,
+        *,
+        control_expression: torch.Tensor,
+        expression_pred: torch.Tensor,
+        delta_signal: torch.Tensor,
+        pair_hidden: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.response_trajectory_encoder is None:
+            raise RuntimeError("response trajectory encoder was not initialized")
+        control_proj = self._project_trajectory_signal(control_expression)
+        pred_proj = self._project_trajectory_signal(expression_pred)
+        delta_proj = self._project_trajectory_signal(delta_signal)
+        trajectory_hidden = self.response_trajectory_encoder(torch.cat([control_proj, pred_proj, delta_proj], dim=-1))
+        if self.response_trajectory_pair_encoder is not None:
+            trajectory_hidden = self.response_trajectory_pair_encoder(
+                torch.cat([trajectory_hidden, pair_hidden, trajectory_hidden * pair_hidden], dim=-1)
+            )
+        return trajectory_hidden
+
     def _add_delta_logits(
         self,
         response_logits: torch.Tensor,
@@ -1233,17 +1359,66 @@ class FastDeltaDrugResponseModel(nn.Module):
             synergy_logits + scale * gate * self.delta_synergy_head(delta_hidden),
         )
 
+    def _add_trajectory_logits(
+        self,
+        response_logits: torch.Tensor,
+        synergy_logits: torch.Tensor,
+        trajectory_hidden: torch.Tensor | None,
+        fusion_hidden: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if not self.trajectory_logit_scale and not self.trajectory_logit_learnable:
+            return response_logits, synergy_logits
+        if trajectory_hidden is None or self.trajectory_response_head is None or self.trajectory_synergy_head is None:
+            raise RuntimeError("trajectory logit heads were not initialized")
+        gate = 1.0
+        if self.trajectory_logit_gate_head is not None:
+            gate = torch.sigmoid(self.trajectory_logit_gate_head(fusion_hidden))
+        scale = (
+            torch.clamp(
+                self.trajectory_logit_scale_param.to(device=trajectory_hidden.device, dtype=trajectory_hidden.dtype),
+                min=0.0,
+            )
+            if self.trajectory_logit_scale_param is not None
+            else float(self.trajectory_logit_scale)
+        )
+        return (
+            response_logits + scale * gate * self.trajectory_response_head(trajectory_hidden),
+            synergy_logits + scale * gate * self.trajectory_synergy_head(trajectory_hidden),
+        )
+
     def delta_teacher_logits(
         self,
         batch: dict[str, torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor] | None:
-        if self.response_delta_mode == "off" or self.delta_response_head is None or self.delta_synergy_head is None:
+        has_delta_teacher = self.response_delta_mode != "off" and self.delta_response_head is not None
+        has_trajectory_teacher = self.response_trajectory_mode != "off" and self.trajectory_response_head is not None
+        if not has_delta_teacher and not has_trajectory_teacher:
             return None
         control_expression = torch.nan_to_num(batch["control_expression"].float(), nan=0.0, posinf=0.0, neginf=0.0)
         perturb_expression = torch.nan_to_num(batch["perturb_expression"].float(), nan=0.0, posinf=0.0, neginf=0.0)
         delta_signal = perturb_expression - control_expression if self.residual_expression else perturb_expression
-        delta_hidden = self._encode_response_delta(delta_signal)
-        return self.delta_response_head(delta_hidden), self.delta_synergy_head(delta_hidden)
+        response_logits = None
+        synergy_logits = None
+        if has_delta_teacher:
+            delta_hidden = self._encode_response_delta(delta_signal)
+            response_logits = self.delta_response_head(delta_hidden)
+            synergy_logits = self.delta_synergy_head(delta_hidden)
+        if has_trajectory_teacher:
+            drug_embeddings = batch["drug_embeddings"].float()
+            graph_features = batch["graph_features"].float() if self.graph_feature_dim > 0 else None
+            pair_hidden = self._encode_drug_pair(drug_embeddings, graph_features, batch.get("drug_indices"))
+            trajectory_hidden = self._encode_response_trajectory(
+                control_expression=control_expression,
+                expression_pred=perturb_expression,
+                delta_signal=delta_signal,
+                pair_hidden=pair_hidden,
+            )
+            trajectory_response = self.trajectory_response_head(trajectory_hidden)
+            trajectory_synergy = self.trajectory_synergy_head(trajectory_hidden)
+            response_logits = trajectory_response if response_logits is None else response_logits + trajectory_response
+            synergy_logits = trajectory_synergy if synergy_logits is None else synergy_logits + trajectory_synergy
+        return response_logits, synergy_logits
+
 
     def _pair_encoder_input_dim(self, hidden_dim: int) -> int:
         if self.pair_fusion_mode == "symmetric":

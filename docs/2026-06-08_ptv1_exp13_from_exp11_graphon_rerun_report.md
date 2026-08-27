@@ -34,5 +34,5 @@ The run is pinned to the exp_11 best candidate `mse050_drop010` with graph featu
 
 - source manifest: `checkpoints/20260608_ptv1_cell_llm_tune_v1_mse050_drop010_ptv1_random_split/run_manifest.json`
 - all_train checkpoint manifest: `checkpoints/20260608_ptv1_cell_llm_exp13_from_exp11_graphon_v2_mse050_drop010_all_ptv1_for_extra_from_exp11/run_manifest.json`
-- exp_13_direct_from_exp11 inference manifest: `outputs/20260608_ptv1_cell_llm_exp13_from_exp11_graphon_v2_mse050_drop010_extra_direct_from_exp11/ptv1_extra_singledrug/run_manifest.json`
-- exp_13_all_train_from_exp11 inference manifest: `outputs/20260608_ptv1_cell_llm_exp13_from_exp11_graphon_v2_mse050_drop010_all_ptv1_for_extra_from_exp11/ptv1_extra_singledrug/run_manifest.json`
+- exp_13_direct_from_exp11 inference manifest: `outputs/2026-06/2026-06-08/20260608_ptv1_cell_llm_exp13_from_exp11_graphon_v2_mse050_drop010_extra_direct_from_exp11/ptv1_extra_singledrug/run_manifest.json`
+- exp_13_all_train_from_exp11 inference manifest: `outputs/2026-06/2026-06-08/20260608_ptv1_cell_llm_exp13_from_exp11_graphon_v2_mse050_drop010_all_ptv1_for_extra_from_exp11/ptv1_extra_singledrug/run_manifest.json`

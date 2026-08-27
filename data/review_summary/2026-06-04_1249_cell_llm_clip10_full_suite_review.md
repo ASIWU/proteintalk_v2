@@ -29,8 +29,8 @@
 ## Artifacts
 
 - Full Markdown report: `logs/20260604_cell_llm_dose_clip10_selected_v1_cell_drug_dose_time_eval.md`
-- CSV report: `outputs/20260604_cell_llm_dose_clip10_selected_v1_cell_drug_dose_time_eval.csv`
-- JSON report: `outputs/20260604_cell_llm_dose_clip10_selected_v1_cell_drug_dose_time_eval.json`
+- CSV report: `outputs/2026-06/2026-06-04/20260604_cell_llm_dose_clip10_selected_v1_cell_drug_dose_time_eval.csv`
+- JSON report: `outputs/2026-06/2026-06-04/20260604_cell_llm_dose_clip10_selected_v1_cell_drug_dose_time_eval.json`
 - Runtime summary: `logs/20260604_cell_llm_dose_clip10_selected_v1_runtime_summary.tsv`
 - Reference epoch summaries:
   - `logs/20260604_cell_llm_dose_clip10_selected_v1_exp07_extra_single_all_train_infer_all_single_for_extra_reference_epoch_summary.json`

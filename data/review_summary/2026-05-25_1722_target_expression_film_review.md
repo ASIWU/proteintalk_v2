@@ -37,7 +37,7 @@
   - response logits `(16, 1)`
   - synergy logits `(16, 1)`
 - Inference smoke test passed with the best pair-add checkpoint on `cell_5fold_fold0`, `limit_batches=1`:
-  - wrote 8 predictions to `outputs/debug_targetexpr_pairadd_infer_smoke/predictions.parquet`
+  - wrote 8 predictions to `outputs/2026-05/2026-05-25/debug_targetexpr_pairadd_infer_smoke/predictions.parquet`
   - checkpoint config validation passed with target-expression args enabled.
 
 ## Results

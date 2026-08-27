@@ -18,8 +18,8 @@ Reviewed the corrected Cell LLM clip10 tuning artifacts after the all-mode runne
 - Selected completed `32/32` manifests with zero validation errors.
 - Final report artifacts exist:
   - `logs/20260604_cell_llm_clip10_tuned_selected_v1_cell_drug_dose_time_eval.md`
-  - `outputs/20260604_cell_llm_clip10_tuned_selected_v1_cell_drug_dose_time_eval.csv`
-  - `outputs/20260604_cell_llm_clip10_tuned_selected_v1_cell_drug_dose_time_eval.json`
+  - `outputs/2026-06/2026-06-04/20260604_cell_llm_clip10_tuned_selected_v1_cell_drug_dose_time_eval.csv`
+  - `outputs/2026-06/2026-06-04/20260604_cell_llm_clip10_tuned_selected_v1_cell_drug_dose_time_eval.json`
 - Manifest audit confirmed `cell_llm_mode=frozen`, `cell_llm_summary.embedding_rows=74`, no old `cell_type_llm` key, graph mode `zero` for exp05, and graph mode `real` for the other selected experiments.
 - exp07 and exp08 reference policies used mean-nearest reference epochs from selected exp01/exp06 and selected `last.ckpt`.
 

@@ -17,11 +17,13 @@ from _shared import REPO_ROOT, load_json
 
 
 DEFAULT_OUTPUT_ROOT = REPO_ROOT / "data" / "training_ready"
+DEFAULT_PTV1_EXPERIMENT_TYPE_DIR = REPO_ROOT / "data" / "rawdata" / "ptv1" / "experiment_type_list"
 MAIN_TASK = "ptv1_aivc"
 EXTRA_TASK = "ptv1_extra_singledrug"
 MAIN_STRATEGIES = ["fixed_experiment_type", "random"] + [f"pert_id_5fold_fold{idx}" for idx in range(5)] + [
     "all_train_subset_test"
 ]
+PTV1_DRUG_PLACEHOLDERS = {"", "na", "nan", "no", "none", "null"}
 
 
 def load_pickle(path: Path) -> object:
@@ -55,6 +57,88 @@ def is_control_frame(df: pd.DataFrame) -> pd.Series:
     return control.eq(sample_id) | control.str.lower().eq("control")
 
 
+def clean_text(value: object) -> str:
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return ""
+    text = str(value).strip()
+    if text.lower() in {"nan", "none", "null"}:
+        return ""
+    return text
+
+
+def clean_ptv1_drug_id(value: object) -> str:
+    text = clean_text(value)
+    if text.lower() in PTV1_DRUG_PLACEHOLDERS:
+        return ""
+    return text
+
+
+def canonical_ptv1_drug_key(drug_ids: list[object]) -> tuple[str, ...]:
+    cleaned: list[str] = []
+    for drug_id in drug_ids:
+        value = clean_ptv1_drug_id(drug_id)
+        if value and value not in cleaned:
+            cleaned.append(value)
+    if len(cleaned) <= 1:
+        return tuple(cleaned)
+    return tuple(sorted(cleaned))
+
+
+def format_ptv1_drug_key(drug_key: tuple[str, ...]) -> str:
+    return "+".join(drug_key) if drug_key else "no"
+
+
+def parse_ptv1_canonical_key(value: object) -> tuple[str, ...]:
+    text = clean_text(value)
+    if not text or text.lower() in PTV1_DRUG_PLACEHOLDERS:
+        return ()
+    return canonical_ptv1_drug_key(text.split("+"))
+
+
+def ptv1_row_drug_key(df: pd.DataFrame, row_index: int) -> tuple[str, ...]:
+    if "ptv1_canonical_pert_key" in df.columns:
+        parsed = parse_ptv1_canonical_key(df.at[row_index, "ptv1_canonical_pert_key"])
+        if parsed:
+            return parsed
+    return canonical_ptv1_drug_key(
+        [
+            df.at[row_index, "pert_id1"] if "pert_id1" in df.columns else "",
+            df.at[row_index, "pert_id2"] if "pert_id2" in df.columns else "",
+        ]
+    )
+
+
+def ptv1_split_cell_value(df: pd.DataFrame, row_index: int) -> str:
+    if "ptv1_split_cell" in df.columns:
+        value = clean_text(df.at[row_index, "ptv1_split_cell"])
+        if value:
+            return value
+    return clean_text(df.at[row_index, "Cell_plate"] if "Cell_plate" in df.columns else "")
+
+
+def parse_ptv1_experiment_type_file(path: Path) -> set[tuple[str, tuple[str, ...]]]:
+    pairs: set[tuple[str, tuple[str, ...]]] = set()
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            parts = stripped.split()
+            first_cell, first_pert = parts[0].split("_", 1)
+            drug_key = canonical_ptv1_drug_key([first_pert, *parts[1:]])
+            if drug_key:
+                pairs.add((clean_text(first_cell), drug_key))
+    return pairs
+
+
+def load_ptv1_experiment_type_pairs(split_dir: Path = DEFAULT_PTV1_EXPERIMENT_TYPE_DIR) -> dict[str, set[tuple[str, tuple[str, ...]]]]:
+    return {
+        "train": parse_ptv1_experiment_type_file(split_dir / "train_experiment_type_list.txt"),
+        "valid": parse_ptv1_experiment_type_file(split_dir / "val_experiment_type_list.txt"),
+        "test": parse_ptv1_experiment_type_file(split_dir / "test_experiment_type_list.txt"),
+    }
+
+
 def encode_binary_label(value: object) -> int | None:
     if value is None or (isinstance(value, float) and np.isnan(value)):
         return None
@@ -82,6 +166,12 @@ def primary_non_control_indices(df: pd.DataFrame) -> list[int]:
     membership = df.get("feature_membership", pd.Series(["primary"] * len(df))).astype("string").fillna("").str.strip()
     mask = (~is_control_frame(df)) & source_role.eq("self") & membership.eq("primary")
     return [int(idx) for idx in df.index[mask]]
+
+
+def primary_valid_anchor_indices(df: pd.DataFrame) -> list[int]:
+    sample_ids = set(df["sample_id"].astype("string").fillna("").str.strip().tolist())
+    controls = df["control"].astype("string").fillna("").str.strip()
+    return [idx for idx in primary_non_control_indices(df) if controls.iloc[idx] in sample_ids]
 
 
 def validate_task_outputs(
@@ -134,6 +224,27 @@ def validate_task_outputs(
             values = pd.to_numeric(frame[column], errors="coerce")
             if values.isna().any() or (values < 0).any() or (values >= len(meta["pert_index"])).any():
                 failures.append(f"{task_name} {frame_name}: invalid {column}")
+
+    if task_name == MAIN_TASK:
+        no_pert_index = int(meta["special_values"]["pert_index"]["no"])
+        for frame_name, frame in (("processed", processed), ("feature", feature)):
+            non_control = ~frame["is_control"].astype(bool)
+            pert1 = frame["pert_id1"].astype("string").fillna("").str.strip()
+            pert2 = frame["pert_id2"].astype("string").fillna("").str.strip()
+            missing_slots = non_control & (pert1.eq("") | pert2.eq(""))
+            if missing_slots.any():
+                failures.append(f"{task_name} {frame_name}: non-control rows require non-empty pert_id1/pert_id2")
+            pert_index1 = pd.to_numeric(frame["pert_index1"], errors="coerce")
+            pert_index2 = pd.to_numeric(frame["pert_index2"], errors="coerce")
+            no_index_rows = non_control & (pert_index1.eq(no_pert_index) | pert_index2.eq(no_pert_index))
+            if no_index_rows.any():
+                failures.append(f"{task_name} {frame_name}: non-control rows must not use special no pert indices")
+            combo_rows = non_control & pert1.ne(pert2)
+            combo_no_index = combo_rows & (pert_index1.eq(no_pert_index) | pert_index2.eq(no_pert_index))
+            if combo_no_index.any():
+                failures.append(f"{task_name} {frame_name}: combo rows must encode two real perturbation indices")
+            if int(combo_rows.sum()) == 0:
+                failures.append(f"{task_name} {frame_name}: no combo rows found")
 
     if task_name == EXTRA_TASK:
         for frame_name, frame in (("processed", processed), ("feature", feature)):
@@ -233,16 +344,63 @@ def validate_pert_id_fold_disjoint(
     failures: list[str],
 ) -> None:
     split_dir = output_root / "ptv1" / "splits" / MAIN_TASK
-    pert_ids = feature_df["pert_id1"].astype("string").fillna("").str.strip()
-    anchor_set = set(primary_non_control_indices(feature_df))
+    anchor_set = set(primary_valid_anchor_indices(feature_df))
     for fold in range(5):
         strategy = f"pert_id_5fold_fold{fold}"
         groups: dict[str, set[str]] = {}
         for split_name in ("train", "valid", "test"):
             indices = [idx for idx in load_indices(split_dir, split_name, strategy, failures, MAIN_TASK) if idx in anchor_set]
-            groups[split_name] = set(pert_ids.iloc[indices].tolist())
+            groups[split_name] = {format_ptv1_drug_key(ptv1_row_drug_key(feature_df, idx)) for idx in indices}
         if groups["train"] & groups["valid"] or groups["train"] & groups["test"] or groups["valid"] & groups["test"]:
-            failures.append(f"{MAIN_TASK} {strategy}: pert_id1 appears in multiple split sets")
+            failures.append(f"{MAIN_TASK} {strategy}: canonical pert key appears in multiple split sets")
+
+
+def validate_fixed_experiment_type_split(
+    *,
+    output_root: Path,
+    feature_df: pd.DataFrame,
+    failures: list[str],
+) -> None:
+    split_dir = output_root / "ptv1" / "splits" / MAIN_TASK
+    raw_pairs = load_ptv1_experiment_type_pairs()
+    anchor_set = set(primary_valid_anchor_indices(feature_df))
+    raw_covered_anchor_set = {
+        idx
+        for idx in anchor_set
+        if (ptv1_split_cell_value(feature_df, idx), ptv1_row_drug_key(feature_df, idx))
+        in (raw_pairs["train"] | raw_pairs["valid"] | raw_pairs["test"])
+    }
+    observed_anchor_set: set[int] = set()
+    double_counts: dict[str, int] = {}
+    wrong_split_examples: list[dict[str, object]] = []
+
+    for split_name in ("train", "valid", "test"):
+        indices = [idx for idx in load_indices(split_dir, split_name, "fixed_experiment_type", failures, MAIN_TASK) if idx in anchor_set]
+        observed_anchor_set.update(indices)
+        double_counts[split_name] = 0
+        for idx in indices:
+            drug_key = ptv1_row_drug_key(feature_df, idx)
+            key = (ptv1_split_cell_value(feature_df, idx), drug_key)
+            double_counts[split_name] += int(len(drug_key) == 2)
+            if key not in raw_pairs[split_name] and len(wrong_split_examples) < 20:
+                wrong_split_examples.append(
+                    {
+                        "row_index": int(idx),
+                        "split": split_name,
+                        "ptv1_split_cell": key[0],
+                        "ptv1_canonical_pert_key": format_ptv1_drug_key(drug_key),
+                    }
+                )
+        if double_counts[split_name] == 0:
+            failures.append(f"{MAIN_TASK} fixed_experiment_type/{split_name}: expected nonzero combo rows")
+
+    if observed_anchor_set != raw_covered_anchor_set:
+        failures.append(
+            f"{MAIN_TASK} fixed_experiment_type: split anchors do not cover all raw-list-covered primary non-control anchors; "
+            f"missing={len(raw_covered_anchor_set - observed_anchor_set)} extra={len(observed_anchor_set - raw_covered_anchor_set)}"
+        )
+    if wrong_split_examples:
+        failures.append(f"{MAIN_TASK} fixed_experiment_type: rows assigned outside raw experiment_type split; examples={wrong_split_examples[:5]}")
 
 
 def main() -> None:
@@ -273,6 +431,7 @@ def main() -> None:
         allow_all_train_subset_overlap=True,
         failures=failures,
     )
+    validate_fixed_experiment_type_split(output_root=args.output_root, feature_df=main_feature, failures=failures)
     validate_pert_id_fold_disjoint(output_root=args.output_root, feature_df=main_feature, failures=failures)
     validate_split_family(
         output_root=args.output_root,

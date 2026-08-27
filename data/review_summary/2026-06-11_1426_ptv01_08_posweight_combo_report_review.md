@@ -13,7 +13,7 @@
 - Screen report: `logs/20260610_ptv01_08_posweight_combo_v1_param_search_report.md`
 - Full report: `logs/20260610_ptv01_08_posweight_combo_v1_full_param_search_report.md`
 - Final raw report: `logs/20260610_ptv01_08_posweight_combo_selected_v1_cell_drug_dose_time_eval.md`
-- Final CSV/JSON: `outputs/20260610_ptv01_08_posweight_combo_selected_v1_cell_drug_dose_time_eval.csv`, `outputs/20260610_ptv01_08_posweight_combo_selected_v1_cell_drug_dose_time_eval.json`
+- Final CSV/JSON: `outputs/2026-06/2026-06-10/20260610_ptv01_08_posweight_combo_selected_v1_cell_drug_dose_time_eval.csv`, `outputs/2026-06/2026-06-10/20260610_ptv01_08_posweight_combo_selected_v1_cell_drug_dose_time_eval.json`
 - GPU summary: `logs/20260610_ptv01_08_posweight_combo_v1_gpu_job_summary.tsv`
 - Final runtime summary: `logs/20260610_ptv01_08_posweight_combo_selected_v1_runtime_summary.tsv`
 - Selected run manifests under `checkpoints/20260610_ptv01_08_posweight_combo_selected_v1_*/run_manifest.json`

@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+EXPERIMENT_SET_NAME="extra_single_prism2_all_train_infer"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ptv3_experiment_common.sh"
+
+ptv3_print_settings "Baseline4 PRISM2 train on all single-drug data, then infer extra single-drug datasets"
+ptv3_run_preflight
+
+all_single_exp="${EXP_PREFIX}_all_single_prism2_for_extra"
+train_args=(--skip-test --effective-key1 PRISM2nd_label_total)
+checkpoint_policy="best_validation"
+if [[ -n "${REFERENCE_5FOLD_CKPT_PATH}" ]]; then
+  if [[ "${SAVE_LAST_CKPT}" != "1" ]]; then
+    echo "[error] reference epoch policy requires SAVE_LAST_CKPT=1 so last.ckpt can be used for extra inference" >&2
+    exit 1
+  fi
+  if [[ "${SCHEDULER_NAME}" == "plateau" ]]; then
+    echo "[error] reference epoch policy rejects SCHEDULER_NAME=plateau because all-data validation would affect the learning-rate schedule" >&2
+    exit 1
+  fi
+  reference_split_strategy_regex="${REFERENCE_SPLIT_STRATEGY_REGEX:-^pert_stratified_5fold_fold[0-9]+$}"
+  reference_summary_json="${LOG_DIR}/${all_single_exp}_reference_epoch_summary.json"
+  reference_epoch="$(ptv3_reference_epoch \
+    "${REFERENCE_5FOLD_CKPT_PATH}" \
+    ptv3_main_singledrug_prism2 \
+    response \
+    "${reference_split_strategy_regex}" \
+    "${reference_summary_json}")"
+  reference_max_epochs="$((reference_epoch + 1))"
+  checkpoint_policy="reference_epoch"
+  echo "[checkpoint-policy] extra single PRISM2 uses reference ${REFERENCE_EPOCH_AGG} epoch=${reference_epoch}; training all-single for max_epochs=${reference_max_epochs} and using last.ckpt"
+  train_args+=(--max-epochs "${reference_max_epochs}" --monitor none)
+fi
+
+ptv3_train "${all_single_exp}" \
+  ptv3_main_singledrug_prism2 all_train_subset_test response \
+  "${train_args[@]}"
+if [[ "${checkpoint_policy}" == "reference_epoch" ]]; then
+  ptv3_record_reference_epoch_policy \
+    "${all_single_exp}" \
+    "${REFERENCE_5FOLD_CKPT_PATH}" \
+    ptv3_main_singledrug_prism2 \
+    "${reference_epoch}" \
+    "${reference_max_epochs}" \
+    "${reference_split_strategy_regex}" \
+    "${reference_summary_json}"
+fi
+
+if [[ "${RUN_INFERENCE}" == "1" ]]; then
+  if [[ "${checkpoint_policy}" == "reference_epoch" ]]; then
+    all_single_ckpt="$(ptv3_last_checkpoint "${all_single_exp}")"
+  else
+    all_single_ckpt="$(ptv3_best_checkpoint "${all_single_exp}")"
+  fi
+  for task_name in \
+    ptv3_extra_singledrug_mat1_480_faims \
+    ptv3_extra_singledrug_mat1_qe \
+    ptv3_extra_singledrug_mat2_480_faims \
+    ptv3_extra_singledrug_mat2_qe \
+    ptv3_extra_singledrug_mat3_qe \
+    ptv3_extra_singledrug_mat4_qe; do
+    ptv3_infer "${all_single_ckpt}" "${task_name}" response "${all_single_exp}"
+  done
+
+  "${PYTHON_BIN}" scripts/show_extra_results.py \
+    "${OUTPUT_DIR}/${all_single_exp}" \
+    --csv-out "${OUTPUT_DIR}/${all_single_exp}/extra_singledrug_metrics.csv" \
+    --format markdown
+fi
+
+ptv3_done

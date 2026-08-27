@@ -122,10 +122,10 @@ All formal training manifests had `dataset_group=ptv1`, `cell_llm_mode=frozen`, 
 ## Artifacts
 
 - Full markdown table: `logs/20260608_ptv1_cell_llm_tune_v1_fine_tune_results.md`
-- Full TSV table: `outputs/20260608_ptv1_cell_llm_tune_v1_fine_tune_results.tsv`
+- Full TSV table: `outputs/2026-06/2026-06-08/20260608_ptv1_cell_llm_tune_v1_fine_tune_results.tsv`
 - Runtime summaries: `logs/20260608_ptv1_cell_llm_tune_v1_*_runtime_summary.tsv`
 - Checkpoints: `checkpoints/20260608_ptv1_cell_llm_tune_v1_*`
-- Extra predictions: `outputs/20260608_ptv1_cell_llm_tune_v1_*/ptv1_extra_singledrug/predictions.parquet`
+- Extra predictions: `outputs/2026-06/2026-06-08/20260608_ptv1_cell_llm_tune_v1_*/ptv1_extra_singledrug/predictions.parquet`
 
 ## Recommendation
 

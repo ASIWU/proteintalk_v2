@@ -17,13 +17,10 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-try:
-    from torch_geometric.data import HeteroData
-    from torch_geometric.nn import HeteroConv, MessagePassing
-except Exception:  # pragma: no cover - dependency is validated in flow_v2.
-    HeteroData = None
-    HeteroConv = None
-    MessagePassing = None
+HeteroData = None
+HeteroConv = None
+MessagePassing = None
+WeightedSAGEConvHetero = None
 
 
 PDI_HETERO_MODEL_NAME = "attention_v10_hetero_cls_ee"
@@ -109,53 +106,77 @@ class MultiCategoryEmbeddingStack(nn.Module):
         return torch.stack(embedded_features, dim=1)
 
 
-if MessagePassing is not None:
+def ensure_torch_geometric():
+    """Import PyG only for graph-model execution.
 
-    class WeightedSAGEConvHetero(MessagePassing):
-        """Port of legacy ``WeightedSAGEConv_hetero``."""
+    The default fast-delta path does not use PyG, and importing the full
+    torch_geometric package can be slow on shared filesystems.
+    """
 
-        def __init__(self, in_channels, out_channels: int, aggr: str = "mean", bias: bool = True) -> None:
-            super().__init__(aggr=aggr, node_dim=0)
-            if isinstance(in_channels, int):
-                in_channels = (in_channels, in_channels)
-            if not isinstance(in_channels, (tuple, list)) or len(in_channels) != 2:
-                raise ValueError("in_channels must be an int or a (src_dim, dst_dim) pair")
-            self.in_channels = (int(in_channels[0]), int(in_channels[1]))
-            self.out_channels = int(out_channels)
-            self.lin_neigh = nn.Linear(self.in_channels[0], self.out_channels, bias=bias)
-            self.lin_update = nn.Linear(self.in_channels[1] + self.out_channels, self.out_channels, bias=bias)
-            self.reset_parameters()
+    global HeteroData, HeteroConv, MessagePassing, WeightedSAGEConvHetero
+    if HeteroData is not None and HeteroConv is not None and WeightedSAGEConvHetero is not None:
+        return HeteroData, HeteroConv, WeightedSAGEConvHetero
 
-        def reset_parameters(self) -> None:
-            self.lin_neigh.reset_parameters()
-            self.lin_update.reset_parameters()
+    try:
+        from torch_geometric.data import HeteroData as _HeteroData
+        from torch_geometric.nn import HeteroConv as _HeteroConv
+        from torch_geometric.nn import MessagePassing as _MessagePassing
+    except Exception as exc:  # pragma: no cover - dependency is validated in flow_v2.
+        raise ImportError("torch_geometric is required for PDI graph models") from exc
 
-        def forward(self, x, edge_index, edge_weight=None, size=None):
-            if isinstance(x, tuple):
-                x_src, x_dst = x
-            else:
-                x_src = x_dst = x
-            if x_src is None or x_dst is None:
-                raise ValueError("x must provide both source and destination node features")
-            if size is None:
-                size = (x_src.size(0), x_dst.size(0))
-            if edge_weight is None:
-                edge_weight = x_src.new_ones(edge_index.size(1))
-            else:
-                edge_weight = edge_weight.to(dtype=x_src.dtype, device=x_src.device)
-            x_src_transformed = self.lin_neigh(x_src)
-            out = self.propagate(edge_index=edge_index, x=x_src_transformed, edge_weight=edge_weight, size=size)
-            if out.size(0) != x_dst.size(0):
-                raise RuntimeError(
-                    f"aggregated node count {out.size(0)} does not match destination count {x_dst.size(0)}"
-                )
-            return self.lin_update(torch.cat([x_dst, out], dim=-1))
+    HeteroData = _HeteroData
+    HeteroConv = _HeteroConv
+    MessagePassing = _MessagePassing
 
-        def message(self, x_j, edge_weight):
-            return edge_weight.unsqueeze(-1) * x_j
+    if WeightedSAGEConvHetero is None:
 
-else:
-    WeightedSAGEConvHetero = None
+        class WeightedSAGEConvHeteroImpl(_MessagePassing):
+            """Port of legacy ``WeightedSAGEConv_hetero``."""
+
+            def __init__(self, in_channels, out_channels: int, aggr: str = "mean", bias: bool = True) -> None:
+                super().__init__(aggr=aggr, node_dim=0)
+                if isinstance(in_channels, int):
+                    in_channels = (in_channels, in_channels)
+                if not isinstance(in_channels, (tuple, list)) or len(in_channels) != 2:
+                    raise ValueError("in_channels must be an int or a (src_dim, dst_dim) pair")
+                self.in_channels = (int(in_channels[0]), int(in_channels[1]))
+                self.out_channels = int(out_channels)
+                self.lin_neigh = nn.Linear(self.in_channels[0], self.out_channels, bias=bias)
+                self.lin_update = nn.Linear(self.in_channels[1] + self.out_channels, self.out_channels, bias=bias)
+                self.reset_parameters()
+
+            def reset_parameters(self) -> None:
+                self.lin_neigh.reset_parameters()
+                self.lin_update.reset_parameters()
+
+            def forward(self, x, edge_index, edge_weight=None, size=None):
+                if isinstance(x, tuple):
+                    x_src, x_dst = x
+                else:
+                    x_src = x_dst = x
+                if x_src is None or x_dst is None:
+                    raise ValueError("x must provide both source and destination node features")
+                if size is None:
+                    size = (x_src.size(0), x_dst.size(0))
+                if edge_weight is None:
+                    edge_weight = x_src.new_ones(edge_index.size(1))
+                else:
+                    edge_weight = edge_weight.to(dtype=x_src.dtype, device=x_src.device)
+                x_src_transformed = self.lin_neigh(x_src)
+                out = self.propagate(edge_index=edge_index, x=x_src_transformed, edge_weight=edge_weight, size=size)
+                if out.size(0) != x_dst.size(0):
+                    raise RuntimeError(
+                        f"aggregated node count {out.size(0)} does not match destination count {x_dst.size(0)}"
+                    )
+                return self.lin_update(torch.cat([x_dst, out], dim=-1))
+
+            def message(self, x_j, edge_weight):
+                return edge_weight.unsqueeze(-1) * x_j
+
+        WeightedSAGEConvHeteroImpl.__name__ = "WeightedSAGEConvHetero"
+        WeightedSAGEConvHetero = WeightedSAGEConvHeteroImpl
+
+    return HeteroData, HeteroConv, WeightedSAGEConvHetero
 
 
 class PDIOnlyProteinDrugNet(nn.Module):
@@ -172,20 +193,19 @@ class PDIOnlyProteinDrugNet(nn.Module):
         dropout: float = 0.2,
     ) -> None:
         super().__init__()
-        if HeteroConv is None or WeightedSAGEConvHetero is None:
-            raise ImportError("torch_geometric is required for PDI graph models")
+        _, hetero_conv_cls, weighted_sage_cls = ensure_torch_geometric()
         self.dropout = dropout
-        self.conv1 = HeteroConv(
+        self.conv1 = hetero_conv_cls(
             {
-                ("protein", "binds", "drug"): WeightedSAGEConvHetero((protein_in_dim, drug_in_dim), hidden_dim),
-                ("drug", "rev_binds", "protein"): WeightedSAGEConvHetero((drug_in_dim, protein_in_dim), hidden_dim),
+                ("protein", "binds", "drug"): weighted_sage_cls((protein_in_dim, drug_in_dim), hidden_dim),
+                ("drug", "rev_binds", "protein"): weighted_sage_cls((drug_in_dim, protein_in_dim), hidden_dim),
             },
             aggr="sum",
         )
-        self.conv2 = HeteroConv(
+        self.conv2 = hetero_conv_cls(
             {
-                ("protein", "binds", "drug"): WeightedSAGEConvHetero((hidden_dim, hidden_dim), out_dim),
-                ("drug", "rev_binds", "protein"): WeightedSAGEConvHetero((hidden_dim, hidden_dim), out_dim),
+                ("protein", "binds", "drug"): weighted_sage_cls((hidden_dim, hidden_dim), out_dim),
+                ("drug", "rev_binds", "protein"): weighted_sage_cls((hidden_dim, hidden_dim), out_dim),
             },
             aggr="sum",
         )
@@ -223,8 +243,7 @@ def create_pdi_only_graph(
     edge types.
     """
 
-    if HeteroData is None:
-        raise ImportError("torch_geometric is required for PDI graph models")
+    hetero_data_cls, _, _ = ensure_torch_geometric()
     protein_embedding = np.asarray(protein_embedding, dtype=np.float32)
     drug_embedding = np.asarray(drug_embedding, dtype=np.float32)
     pdi_matrix = np.asarray(pdi_matrix, dtype=np.float32)
@@ -245,7 +264,7 @@ def create_pdi_only_graph(
             raise ValueError(f"legacy PDI orientation requires {expected_legacy}, got {pdi_matrix.shape}")
         pdi_for_graph = pdi_matrix
 
-    data = HeteroData()
+    data = hetero_data_cls()
     data["protein"].x = torch.tensor(protein_embedding, dtype=torch.float32)
     data["drug"].x = torch.tensor(drug_embedding, dtype=torch.float32)
     pdi = torch.tensor(pdi_for_graph, dtype=torch.float32)

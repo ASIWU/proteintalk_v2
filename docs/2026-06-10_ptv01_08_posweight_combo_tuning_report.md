@@ -7,15 +7,15 @@ This report consolidates the completed experiment requested by `docs/2026-06-10_
 | kind | path |
 | --- | --- |
 | screen Markdown | logs/20260610_ptv01_08_posweight_combo_v1_param_search_report.md |
-| screen TSV | outputs/20260610_ptv01_08_posweight_combo_v1_param_search_report.tsv |
+| screen TSV | outputs/2026-06/2026-06-10/20260610_ptv01_08_posweight_combo_v1_param_search_report.tsv |
 | full Markdown | logs/20260610_ptv01_08_posweight_combo_v1_full_param_search_report.md |
-| full TSV | outputs/20260610_ptv01_08_posweight_combo_v1_full_param_search_report.tsv |
+| full TSV | outputs/2026-06/2026-06-10/20260610_ptv01_08_posweight_combo_v1_full_param_search_report.tsv |
 | final Markdown | logs/20260610_ptv01_08_posweight_combo_selected_v1_cell_drug_dose_time_eval.md |
-| final CSV | outputs/20260610_ptv01_08_posweight_combo_selected_v1_cell_drug_dose_time_eval.csv |
-| final JSON | outputs/20260610_ptv01_08_posweight_combo_selected_v1_cell_drug_dose_time_eval.json |
+| final CSV | outputs/2026-06/2026-06-10/20260610_ptv01_08_posweight_combo_selected_v1_cell_drug_dose_time_eval.csv |
+| final JSON | outputs/2026-06/2026-06-10/20260610_ptv01_08_posweight_combo_selected_v1_cell_drug_dose_time_eval.json |
 | GPU job summary | logs/20260610_ptv01_08_posweight_combo_v1_gpu_job_summary.tsv |
 | final runtime summary | logs/20260610_ptv01_08_posweight_combo_selected_v1_runtime_summary.tsv |
-| previous selected baseline CSV | outputs/20260604_cell_llm_clip10_tuned_selected_v1_cell_drug_dose_time_eval.csv |
+| previous selected baseline CSV | outputs/2026-06/2026-06-04/20260604_cell_llm_clip10_tuned_selected_v1_cell_drug_dose_time_eval.csv |
 
 ## Completion Audit
 
@@ -452,5 +452,5 @@ Rows are grouped by source. Within each source, split order is `unseenCell_seenD
 - Runner: `scripts/run_ptv01_08_posweight_combo_tune.sh`.
 - Report generator for final metrics: `scripts/report_cell_drug_time_eval.py`.
 - Tuning reporter wrapper: `scripts/report_cell_celltype_llm_clip10_param_search.py`.
-- The final selected run already materialized fold predictions under `outputs/20260610_ptv01_08_posweight_combo_selected_v1_cell_drug_fold_predictions/`; rerunning was not necessary for this report.
+- The final selected run already materialized fold predictions under `outputs/2026-06/2026-06-10/20260610_ptv01_08_posweight_combo_selected_v1_cell_drug_fold_predictions/`; rerunning was not necessary for this report.
 - All displayed metric values are rounded to 4 decimals, matching the tuning plan. Raw precision remains in the CSV/JSON source artifacts.

@@ -6,7 +6,7 @@ This is the completed PTV1 migration and tuning run for the graph + frozen Cell 
 
 - Base prefix: `20260609_ptv1_cell_celltype_llm_tune_v2_api_celltype`
 - Generated report: `logs/20260609_ptv1_cell_celltype_llm_tune_v2_api_celltype_cell_celltype_tune_results.md`
-- Generated TSV: `outputs/20260609_ptv1_cell_celltype_llm_tune_v2_api_celltype_cell_celltype_tune_results.tsv`
+- Generated TSV: `outputs/2026-06/2026-06-09/20260609_ptv1_cell_celltype_llm_tune_v2_api_celltype_cell_celltype_tune_results.tsv`
 - Dataset group: `ptv1`
 - Required policy: graph enabled, Cell LLM frozen, `cell_type` LLM frozen
 - Candidates: `13`

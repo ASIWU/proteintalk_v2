@@ -16,6 +16,12 @@ import pandas as pd
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT_ROOT = REPO_ROOT / "data" / "training_ready"
+PTV3_MAIN_SINGLE = "ptv3_main_singledrug"
+PTV3_MAIN_DOUBLE = "ptv3_main_doubledrug"
+PTV3_MAIN_SINGLE_PRISM2 = "ptv3_main_singledrug_prism2"
+PTV3_MAIN_DOUBLE_PRISM2AUX = "ptv3_main_doubledrug_prism2aux"
+PTV3_MAIN_SINGLE_TASKS = {PTV3_MAIN_SINGLE, PTV3_MAIN_SINGLE_PRISM2}
+PTV3_MAIN_DOUBLE_TASKS = {PTV3_MAIN_DOUBLE, PTV3_MAIN_DOUBLE_PRISM2AUX}
 DISCRETE_FIELDS = [
     "machineID_new",
     "Cell_plate",
@@ -101,9 +107,10 @@ def validate_target_lists(df: pd.DataFrame, *, protein_index_size: int, failures
 def validate_filter_rule(df: pd.DataFrame, *, task_kind: str, task_name: str, failures: list[str]) -> None:
     control = df["is_control"].astype(bool)
     if task_kind == "single":
-        mask = (~control) & (~df["PRISM1st_label_total"].astype("string").fillna("").str.strip().ne(""))
+        label_column = "PRISM2nd_label_total" if task_name == PTV3_MAIN_SINGLE_PRISM2 else "PRISM1st_label_total"
+        mask = (~control) & (~df[label_column].astype("string").fillna("").str.strip().ne(""))
         if mask.any():
-            failures.append(f"{task_name}: found non-control rows with empty PRISM1st_label_total after filtering")
+            failures.append(f"{task_name}: found non-control rows with empty {label_column} after filtering")
     elif task_kind == "double":
         mask = (~control) & (~df["synergy"].astype("string").fillna("").str.strip().ne(""))
         if mask.any():
@@ -195,10 +202,9 @@ def validate_single_drug_contracts(
     if is_single_task:
         validate_single_drug_second_slot(processed_df, task_name=task_name, frame_name="processed", failures=failures)
         validate_single_drug_second_slot(feature_df, task_name=task_name, frame_name="feature", failures=failures)
-    if task_name == "ptv3_main_doubledrug":
+    if task_name in PTV3_MAIN_DOUBLE_TASKS:
         membership = feature_df["feature_membership"].astype("string").fillna("").str.strip()
-        source_task = feature_df["source_task"].astype("string").fillna("").str.strip()
-        auxiliary = feature_df.loc[membership.eq("merged_single_drug") & source_task.eq("ptv3_main_singledrug")]
+        auxiliary = feature_df.loc[membership.eq("merged_single_drug")]
         validate_single_drug_second_slot(
             auxiliary,
             task_name=task_name,
@@ -208,23 +214,22 @@ def validate_single_drug_contracts(
 
 
 def validate_double_drug_auxiliary_labels(feature_df: pd.DataFrame, *, task_name: str, failures: list[str]) -> None:
-    if task_name != "ptv3_main_doubledrug":
+    if task_name not in PTV3_MAIN_DOUBLE_TASKS:
         return
     membership = feature_df["feature_membership"].astype("string").fillna("").str.strip()
-    source_task = feature_df["source_task"].astype("string").fillna("").str.strip()
-    auxiliary = membership.eq("merged_single_drug") & source_task.eq("ptv3_main_singledrug")
+    auxiliary = membership.eq("merged_single_drug")
     if not auxiliary.any():
-        failures.append("ptv3_main_doubledrug: no merged single-drug auxiliary rows found in feature table")
+        failures.append(f"{task_name}: no merged single-drug auxiliary rows found in feature table")
         return
     if "training_label_scope" not in feature_df.columns:
-        failures.append("ptv3_main_doubledrug: missing training_label_scope column")
+        failures.append(f"{task_name}: missing training_label_scope column")
     else:
         bad_scope = auxiliary & ~feature_df["training_label_scope"].astype("string").fillna("").str.strip().eq(
             "single_drug_auxiliary_synergy_masked"
         )
         if bad_scope.any():
             failures.append(
-                "ptv3_main_doubledrug: merged single-drug rows are not marked "
+                f"{task_name}: merged single-drug rows are not marked "
                 "single_drug_auxiliary_synergy_masked"
             )
 
@@ -232,29 +237,30 @@ def validate_double_drug_auxiliary_labels(feature_df: pd.DataFrame, *, task_name
         non_empty_synergy = auxiliary & feature_df["synergy"].astype("string").fillna("").str.strip().ne("")
         if non_empty_synergy.any():
             failures.append(
-                "ptv3_main_doubledrug: merged single-drug auxiliary rows have non-empty synergy; "
+                f"{task_name}: merged single-drug auxiliary rows have non-empty synergy; "
                 "the synergy head must only consume native double-drug labels"
             )
 
-    if "PRISM1st_label_total" in feature_df.columns:
+    response_label = "PRISM2nd_label_total" if task_name == PTV3_MAIN_DOUBLE_PRISM2AUX else "PRISM1st_label_total"
+    if response_label in feature_df.columns:
         non_control_auxiliary = auxiliary & ~feature_df["is_control"].astype(bool)
         empty_active_prism = (
             non_control_auxiliary
-            & feature_df["PRISM1st_label_total"].astype("string").fillna("").str.strip().eq("")
+            & feature_df[response_label].astype("string").fillna("").str.strip().eq("")
         )
         if empty_active_prism.any():
             failures.append(
-                "ptv3_main_doubledrug: non-control auxiliary rows are missing active "
-                "PRISM1st_label_total response labels"
+                f"{task_name}: non-control auxiliary rows are missing active "
+                f"{response_label} response labels"
             )
-    source_label = "auxiliary_source_PRISM1st_label_total"
+    source_label = f"auxiliary_source_{response_label}"
     if source_label not in feature_df.columns:
-        failures.append(f"ptv3_main_doubledrug: missing {source_label} audit column")
+        failures.append(f"{task_name}: missing {source_label} audit column")
     else:
         non_control_auxiliary = auxiliary & ~feature_df["is_control"].astype(bool)
         empty_source = non_control_auxiliary & feature_df[source_label].astype("string").fillna("").str.strip().eq("")
         if empty_source.any():
-            failures.append(f"ptv3_main_doubledrug: auxiliary rows missing preserved {source_label}")
+            failures.append(f"{task_name}: auxiliary rows missing preserved {source_label}")
 
 
 def encode_binary_label(value: object) -> int | None:
@@ -294,8 +300,10 @@ def encode_binary_label(value: object) -> int | None:
 
 
 def split_label_column(task_name: str) -> str:
-    if task_name == "ptv3_main_doubledrug" or "_extra_doubledrug" in task_name:
+    if task_name in PTV3_MAIN_DOUBLE_TASKS or "_extra_doubledrug" in task_name:
         return "synergy"
+    if task_name == PTV3_MAIN_SINGLE_PRISM2:
+        return "PRISM2nd_label_total"
     if "_extra_singledrug" in task_name or task_name == "ptv1_extra_singledrug":
         return "PRISM2nd_label_total"
     return "PRISM1st_label_total"
@@ -325,7 +333,7 @@ def validate_split_label_balance(
     values = [encode_binary_label(value) for value in df.iloc[indices][label_column].tolist()]
     known = [value for value in values if value is not None]
     missing_count = len(values) - len(known)
-    if task_name == "ptv3_main_doubledrug" and split_name == "train":
+    if task_name in PTV3_MAIN_DOUBLE_TASKS and split_name == "train":
         subset = df.iloc[indices]
         merged_single_count = int(subset["feature_membership"].astype("string").fillna("").eq("merged_single_drug").sum())
         if missing_count != merged_single_count:
@@ -441,10 +449,10 @@ def expected_test_only_indices(task_name: str, df: pd.DataFrame) -> tuple[list[i
 def validate_double_drug_unordered_pair_leakage(
     feature_df: pd.DataFrame,
     *,
+    task_name: str,
     output_root: Path,
     failures: list[str],
 ) -> None:
-    task_name = "ptv3_main_doubledrug"
     split_dir = output_root / "ptv3" / "splits" / task_name
     primary = feature_df["feature_membership"].astype("string").fillna("").eq("primary")
     non_control = ~feature_df["is_control"].astype(bool)
@@ -497,27 +505,40 @@ def validate_required_split_artifacts(
         + [f"cell_5fold_fold{idx}" for idx in range(5)]
         + ["all_train_subset_test"]
     )
-    validate_split_family(
-        output_root=output_root,
-        dataset_group="ptv3",
-        task_name="ptv3_main_singledrug",
-        feature_df=feature_tables[("ptv3", "ptv3_main_singledrug")],
-        strategies=single_strategies,
-        allow_all_train_subset_overlap=True,
-        failures=failures,
-    )
+    for task_name in sorted(PTV3_MAIN_SINGLE_TASKS):
+        key = ("ptv3", task_name)
+        if key not in feature_tables:
+            continue
+        validate_split_family(
+            output_root=output_root,
+            dataset_group="ptv3",
+            task_name=task_name,
+            feature_df=feature_tables[key],
+            strategies=single_strategies,
+            allow_all_train_subset_overlap=True,
+            failures=failures,
+        )
     double_strategies = [f"pert_id_5fold_fold{idx}" for idx in range(5)] + ["all_train_subset_test"]
-    double_df = feature_tables[("ptv3", "ptv3_main_doubledrug")]
-    validate_split_family(
-        output_root=output_root,
-        dataset_group="ptv3",
-        task_name="ptv3_main_doubledrug",
-        feature_df=double_df,
-        strategies=double_strategies,
-        allow_all_train_subset_overlap=True,
-        failures=failures,
-    )
-    validate_double_drug_unordered_pair_leakage(double_df, output_root=output_root, failures=failures)
+    for task_name in sorted(PTV3_MAIN_DOUBLE_TASKS):
+        key = ("ptv3", task_name)
+        if key not in feature_tables:
+            continue
+        double_df = feature_tables[key]
+        validate_split_family(
+            output_root=output_root,
+            dataset_group="ptv3",
+            task_name=task_name,
+            feature_df=double_df,
+            strategies=double_strategies,
+            allow_all_train_subset_overlap=True,
+            failures=failures,
+        )
+        validate_double_drug_unordered_pair_leakage(
+            double_df,
+            task_name=task_name,
+            output_root=output_root,
+            failures=failures,
+        )
     for task_name in sorted(task for task in audit["tasks"] if task.startswith("ptv3_extra_")):
         validate_split_family(
             output_root=output_root,

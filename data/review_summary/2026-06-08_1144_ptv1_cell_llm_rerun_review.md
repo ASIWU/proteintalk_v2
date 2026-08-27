@@ -52,7 +52,7 @@ Review time: 2026-06-08 11:44 HKT.
   - predictions written for 218 extra rows.
 - Generated reports:
   - `logs/20260608_ptv1_cell_llm_v1_ptv1_exp_results.md`;
-  - `outputs/20260608_ptv1_cell_llm_v1_ptv1_exp_results.csv`.
+  - `outputs/2026-06/2026-06-08/20260608_ptv1_cell_llm_v1_ptv1_exp_results.csv`.
 
 ## Validation Performed
 

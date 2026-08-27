@@ -6,7 +6,7 @@ Reviewed whether the 5 patient validation datasets were fully inferenced, whethe
 
 ## Inference Coverage
 
-- Latest run reviewed: `outputs/20260612_patientVali260605v3_inference_summary.json`.
+- Latest run reviewed: `outputs/2026-06/2026-06-12/20260612_patientVali260605v3_inference_summary.json`.
 - Prediction files: 8/8 expected tasks present.
 - Total prediction rows: 876.
 - Per-dataset supported rows inferenced:

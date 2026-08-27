@@ -4,7 +4,7 @@
 
 - Reviewed and used `utils/17_infer_patient_validation_exp09_all_epoch_ckpts.py` for exp09 unified-head patient validation inference.
 - Ran exp09 checkpoints `epoch=0.ckpt` through `epoch=49.ckpt` on the existing v3 patient validation training-ready data.
-- Exported raw outputs to `outputs/20260615_patientVali260605v3_exp09_all_epoch_ckpts/` and readable outputs to `outputs/0615v3_exp09_all_epoch_ckpts/`.
+- Exported raw outputs to `outputs/2026-06/2026-06-15/20260615_patientVali260605v3_exp09_all_epoch_ckpts/` and readable outputs to `outputs/2026-06/2026-06-15/0615v3_exp09_all_epoch_ckpts/`.
 
 ## Validation
 

@@ -25,8 +25,8 @@ Actions:
 - Generated inference-only training-ready tasks under `data/training_ready/ptv3/tasks/ptv3_patientVali260605_*`.
 - Generated corresponding test-only splits under `data/training_ready/ptv3/splits/ptv3_patientVali260605_*`.
 - Ran exp_07 for single-drug tasks and exp_08 for double-drug tasks.
-- Wrote merged predictions to `outputs/20260611_patientVali260605_combined/`.
-- Wrote strict standard-compatible predictions to `outputs/20260611_patientVali260605_combined/combined_predictions_standard_only.csv`.
+- Wrote merged predictions to `outputs/2026-06/2026-06-11/20260611_patientVali260605_combined/`.
+- Wrote strict standard-compatible predictions to `outputs/2026-06/2026-06-11/20260611_patientVali260605_combined/combined_predictions_standard_only.csv`.
 
 Verification:
 - `python -m py_compile utils/13_build_patient_validation_inference_tasks.py`

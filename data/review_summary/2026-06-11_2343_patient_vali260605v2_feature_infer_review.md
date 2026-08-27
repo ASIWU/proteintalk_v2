@@ -39,12 +39,12 @@
 - Double-drug tasks used exp_08:
   - `checkpoints/20260610_ptv01_08_posweight_combo_selected_v1_exp08_extra_double_all_train_infer_all_single_double_for_extra/epoch=2-step=234.ckpt`.
 - Per-task outputs:
-  - `outputs/20260611_patientVali260605v2_exp07_single/`;
-  - `outputs/20260611_patientVali260605v2_exp08_double/`.
+  - `outputs/2026-06/2026-06-11/20260611_patientVali260605v2_exp07_single/`;
+  - `outputs/2026-06/2026-06-11/20260611_patientVali260605v2_exp08_double/`.
 - Combined outputs:
-  - `outputs/20260611_patientVali260605v2_combined_predictions.parquet`;
-  - `outputs/20260611_patientVali260605v2_combined_predictions.csv`;
-  - `outputs/20260611_patientVali260605v2_inference_summary.json`.
+  - `outputs/2026-06/2026-06-11/20260611_patientVali260605v2_combined_predictions.parquet`;
+  - `outputs/2026-06/2026-06-11/20260611_patientVali260605v2_combined_predictions.csv`;
+  - `outputs/2026-06/2026-06-11/20260611_patientVali260605v2_inference_summary.json`.
 - Total prediction rows: 876.
 
 ## Verification

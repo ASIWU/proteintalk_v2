@@ -6,12 +6,12 @@ Exp09 follows exp08's all-data training setup, but uses `task_head=unified`: sin
 
 - Prefix: `20260615_1101_exp09_selectedref_v1`
 - Training checkpoint dir: `checkpoints/20260615_1101_exp09_selectedref_v1_unified_all_single_double_for_extra`
-- Valid output root: `outputs/20260615_1101_exp09_selectedref_v1_unified_all_single_double_for_extra_valid`
-- Oracle output roots: `outputs/20260615_1101_exp09_selectedref_v1_unified_all_single_double_for_extra_oracle_epoch*`
+- Valid output root: `outputs/2026-06/2026-06-15/20260615_1101_exp09_selectedref_v1_unified_all_single_double_for_extra_valid`
+- Oracle output roots: `outputs/2026-06/2026-06-15/20260615_1101_exp09_selectedref_v1_unified_all_single_double_for_extra_oracle_epoch*`
 - Runtime summary: `logs/20260615_1101_exp09_selectedref_v1_runtime_summary.tsv`
 - Detailed markdown report: `logs/20260615_1101_exp09_selectedref_v1_unified_all_single_double_for_extra_valid_oracle_eval.md`
-- Detailed CSV: `outputs/20260615_1101_exp09_selectedref_v1_unified_all_single_double_for_extra_valid_oracle_eval.csv`
-- Detailed JSON: `outputs/20260615_1101_exp09_selectedref_v1_unified_all_single_double_for_extra_valid_oracle_eval.json`
+- Detailed CSV: `outputs/2026-06/2026-06-15/20260615_1101_exp09_selectedref_v1_unified_all_single_double_for_extra_valid_oracle_eval.csv`
+- Detailed JSON: `outputs/2026-06/2026-06-15/20260615_1101_exp09_selectedref_v1_unified_all_single_double_for_extra_valid_oracle_eval.json`
 
 ## Training Config
 

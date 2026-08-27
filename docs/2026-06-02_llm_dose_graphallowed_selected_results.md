@@ -8,8 +8,8 @@ The corrected Cell LLM clip10 parameter search, promoted 5-fold validation, and 
 - Promoted full prefix: `20260604_cell_llm_clip10_tune_v1_full`
 - Final selected prefix: `20260604_cell_llm_clip10_tuned_selected_v1`
 - Final report: `logs/20260604_cell_llm_clip10_tuned_selected_v1_cell_drug_dose_time_eval.md`
-- Final CSV: `outputs/20260604_cell_llm_clip10_tuned_selected_v1_cell_drug_dose_time_eval.csv`
-- Final JSON: `outputs/20260604_cell_llm_clip10_tuned_selected_v1_cell_drug_dose_time_eval.json`
+- Final CSV: `outputs/2026-06/2026-06-04/20260604_cell_llm_clip10_tuned_selected_v1_cell_drug_dose_time_eval.csv`
+- Final JSON: `outputs/2026-06/2026-06-04/20260604_cell_llm_clip10_tuned_selected_v1_cell_drug_dose_time_eval.json`
 
 Completion and validation:
 
@@ -113,8 +113,8 @@ Corrected exp01-exp08 training completed on 2026-06-04. exp01-exp06 each have 5 
 Report outputs:
 
 - Markdown: `logs/20260604_cell_llm_dose_clip10_selected_v1_cell_drug_dose_time_eval.md`
-- CSV: `outputs/20260604_cell_llm_dose_clip10_selected_v1_cell_drug_dose_time_eval.csv`
-- JSON: `outputs/20260604_cell_llm_dose_clip10_selected_v1_cell_drug_dose_time_eval.json`
+- CSV: `outputs/2026-06/2026-06-04/20260604_cell_llm_dose_clip10_selected_v1_cell_drug_dose_time_eval.csv`
+- JSON: `outputs/2026-06/2026-06-04/20260604_cell_llm_dose_clip10_selected_v1_cell_drug_dose_time_eval.json`
 - Runtime summary: `logs/20260604_cell_llm_dose_clip10_selected_v1_runtime_summary.tsv`
 
 Validation summary:
@@ -311,10 +311,10 @@ This rerun updates only exp07 and exp08 on the rebuilt `update_0527` extra data 
 ### update_0527 Output Files
 
 - Markdown report: `logs/20260603_update0527_clip10_cell_drug_dose_time_eval.md`
-- CSV report: `outputs/20260603_update0527_clip10_cell_drug_dose_time_eval.csv`
-- JSON report: `outputs/20260603_update0527_clip10_cell_drug_dose_time_eval.json`
+- CSV report: `outputs/2026-06/2026-06-03/20260603_update0527_clip10_cell_drug_dose_time_eval.csv`
+- JSON report: `outputs/2026-06/2026-06-03/20260603_update0527_clip10_cell_drug_dose_time_eval.json`
 - Runtime summary: `logs/20260603_update0527_clip10_runtime_summary.tsv`
-- exp08 test-label report: `outputs/20260603_update0527_clip10_exp08_extra_double_all_train_infer_all_single_double_for_extra/extra_doubledrug_test_label_auprc.csv`
+- exp08 test-label report: `outputs/2026-06/2026-06-03/20260603_update0527_clip10_exp08_extra_double_all_train_infer_all_single_double_for_extra/extra_doubledrug_test_label_auprc.csv`
 - exp07 checkpoint: `checkpoints/20260603_update0527_clip10_exp07_extra_single_all_train_infer_all_single_for_extra/last.ckpt`
 - exp08 checkpoint: `checkpoints/20260603_update0527_clip10_exp08_extra_double_all_train_infer_all_single_double_for_extra/last.ckpt`
 
@@ -547,8 +547,8 @@ The table compares original-method AUPRC and n-AUPRC against `20260601_llm_cellt
 Primary selected suite:
 
 - Markdown report: `logs/20260602_llm_dose_graphallowed_selected_v1_cell_drug_dose_time_eval.md`
-- CSV report: `outputs/20260602_llm_dose_graphallowed_selected_v1_cell_drug_dose_time_eval.csv`
-- JSON report: `outputs/20260602_llm_dose_graphallowed_selected_v1_cell_drug_dose_time_eval.json`
+- CSV report: `outputs/2026-06/2026-06-02/20260602_llm_dose_graphallowed_selected_v1_cell_drug_dose_time_eval.csv`
+- JSON report: `outputs/2026-06/2026-06-02/20260602_llm_dose_graphallowed_selected_v1_cell_drug_dose_time_eval.json`
 - Runtime summary: `logs/20260602_llm_dose_graphallowed_selected_v1_runtime_summary.tsv`
 - exp07 reference epoch summary: `logs/20260602_llm_dose_graphallowed_selected_v1_exp07_extra_single_all_train_infer_all_single_for_extra_reference_epoch_summary.json`
 - exp08 reference epoch summary: `logs/20260602_llm_dose_graphallowed_selected_v1_exp08_extra_double_all_train_infer_all_single_double_for_extra_reference_epoch_summary.json`
@@ -556,8 +556,8 @@ Primary selected suite:
 Fresh w/o graph retrain:
 
 - Markdown report: `logs/20260603_llm_dose_exp01params_wograph_v1_cell_drug_dose_time_eval.md`
-- CSV report: `outputs/20260603_llm_dose_exp01params_wograph_v1_cell_drug_dose_time_eval.csv`
-- JSON report: `outputs/20260603_llm_dose_exp01params_wograph_v1_cell_drug_dose_time_eval.json`
+- CSV report: `outputs/2026-06/2026-06-03/20260603_llm_dose_exp01params_wograph_v1_cell_drug_dose_time_eval.csv`
+- JSON report: `outputs/2026-06/2026-06-03/20260603_llm_dose_exp01params_wograph_v1_cell_drug_dose_time_eval.json`
 - Runtime summary: `logs/20260603_llm_dose_exp01params_wograph_v1_runtime_summary.tsv`
 
 ## Validation
@@ -568,4 +568,4 @@ Fresh w/o graph retrain:
 - Fresh exp05 w/o graph retrain completed all 5 folds under `20260603_llm_dose_exp01params_wograph_v1`.
 - All 5 fresh exp05 manifests report `graph_feature_mode=zero`, `cell_type_llm_mode=frozen`, and `use_dose_covariate=True`.
 - Fresh exp05 manifests match current exp01 `mse050` hyperparameters: LR 2e-4, batch size 256, dropout 0.15, weight decay 1e-4, MSE weight 0.50, hidden dim 512.
-- Fresh exp05 report materialized fold predictions under `outputs/20260603_llm_dose_exp01params_wograph_v1_cell_drug_fold_predictions/exp05/fold*`.
+- Fresh exp05 report materialized fold predictions under `outputs/2026-06/2026-06-03/20260603_llm_dose_exp01params_wograph_v1_cell_drug_fold_predictions/exp05/fold*`.

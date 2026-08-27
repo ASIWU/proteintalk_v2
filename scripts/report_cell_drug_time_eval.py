@@ -128,6 +128,10 @@ INFER_VALUE_ARGS = {
     "response_delta_dim": "--response-delta-dim",
     "response_delta_seed": "--response-delta-seed",
     "delta_logit_scale": "--delta-logit-scale",
+    "response_trajectory_mode": "--response-trajectory-mode",
+    "response_trajectory_dim": "--response-trajectory-dim",
+    "response_trajectory_seed": "--response-trajectory-seed",
+    "trajectory_logit_scale": "--trajectory-logit-scale",
     "control_expression_dropout": "--control-expression-dropout",
     "init_delta_scale": "--init-delta-scale",
     "cell_llm_mode": "--cell-llm-mode",
@@ -148,6 +152,11 @@ INFER_VALUE_ARGS = {
     "observed_perturb_expression_mode": "--observed-perturb-expression-mode",
     "observed_perturb_expression_scale": "--observed-perturb-expression-scale",
     "observed_perturb_logit_scale": "--observed-perturb-logit-scale",
+    "cell_prior_mode": "--cell-prior-mode",
+    "cell_prior_k": "--cell-prior-k",
+    "cell_prior_temperature": "--cell-prior-temperature",
+    "cell_prior_logit_scale": "--cell-prior-logit-scale",
+    "cell_prior_fixed_logit_scale": "--cell-prior-fixed-logit-scale",
 }
 INFER_BOOL_ARGS = {
     "graph_structural_rp": "--graph-structural-rp",
@@ -156,6 +165,8 @@ INFER_BOOL_ARGS = {
     "pair_type_features": "--pair-type-features",
     "response_delta_detach": "--response-delta-detach",
     "delta_logit_learnable": "--delta-logit-learnable",
+    "response_trajectory_detach": "--response-trajectory-detach",
+    "trajectory_logit_learnable": "--trajectory-logit-learnable",
     "use_ddi": "--use-ddi",
     "zero_init_delta_head": "--zero-init-delta-head",
 }

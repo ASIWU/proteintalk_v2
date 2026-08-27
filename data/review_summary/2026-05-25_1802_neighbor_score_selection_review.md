@@ -34,7 +34,7 @@
   - `target_expression_degree_penalty=0.5`
   - `target_expression_cell_gate_mode=magnitude`
 - Inference smoke test passed for the magnitude-gate checkpoint on `cell_5fold_fold0`, `limit_batches=1`:
-  - wrote 8 predictions to `outputs/debug_neighbor_cellmag_infer_smoke/predictions.parquet`
+  - wrote 8 predictions to `outputs/2026-05/2026-05-25/debug_neighbor_cellmag_infer_smoke/predictions.parquet`
 
 ## Fold0 Screening
 

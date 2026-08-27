@@ -41,6 +41,12 @@ import pandas as pd
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RAW_ROOT = REPO_ROOT / "data" / "rawdata"
+PTV3_MAIN_SINGLE_INFO_PATH = (
+    RAW_ROOT
+    / "update_0623"
+    / "260513ptv3_EGH_28602sampinfo_with_smiles_check_prism1_label_add_prism2_label_add_machine_details.csv"
+)
+PTV3_MAIN_SINGLE_EXPR_PATH = RAW_ROOT / "singledrug" / "20250113_ptv3_unique_mat_28602samp_10982prot_finall_v2.csv"
 EXTRA_SINGLE_UPDATE_ROOT = RAW_ROOT / "update_0527" / "extra_singledrug"
 EXTRA_DOUBLE_UPDATE_ROOT = RAW_ROOT / "update_0527" / "extra_doubledrug"
 DEFAULT_OUTPUT_ROOT = REPO_ROOT / "data" / "standardized"
@@ -906,8 +912,8 @@ def apply_canonical_smiles(task_results: list[TaskResult]) -> None:
 
 
 def standardize_main_singledrug(task_dir: Path) -> TaskResult:
-    info_path = RAW_ROOT / "singledrug" / "20260403_ptv3_v2_bind_bio_sampleID_machineID_details.csv"
-    expr_path = RAW_ROOT / "singledrug" / "20250113_ptv3_unique_mat_28602samp_10982prot_finall_v2.csv"
+    info_path = PTV3_MAIN_SINGLE_INFO_PATH
+    expr_path = PTV3_MAIN_SINGLE_EXPR_PATH
 
     info_raw = safe_read_csv(info_path, low_memory=False)
     expr_ids = pd.read_csv(expr_path, usecols=["samp_ID"], low_memory=False)["samp_ID"].astype(str)
@@ -934,7 +940,10 @@ def standardize_main_singledrug(task_dir: Path) -> TaskResult:
     standard["pert_dose1"] = clean_dose(info_raw["pert_dose"])
     standard["pert_dose2"] = np.nan
     standard["PRISM1st_label_total"] = clean_nullable_string(info_raw["PRISM1st_label_total"])
-    standard["PRISM2nd_label_total"] = ""
+    if "PRISM2nd_label_total" in info_raw.columns:
+        standard["PRISM2nd_label_total"] = clean_nullable_string(info_raw["PRISM2nd_label_total"])
+    else:
+        standard["PRISM2nd_label_total"] = ""
     standard["instrument"] = clean_nullable_string(info_raw["instrument"])
     standard["cell_pertid_time"] = clean_nullable_string(info_raw["cell_pertid_time"])
     standard["drugname"] = clean_nullable_string(info_raw["drugname"])
@@ -1016,6 +1025,8 @@ def standardize_main_singledrug(task_dir: Path) -> TaskResult:
             "cell_type": "cell_type",
             "pert_id1": "pert_id",
             "pert_id2": "copied from pert_id1 for single-drug two-slot model input",
+            "PRISM1st_label_total": "PRISM1st_label_total",
+            "PRISM2nd_label_total": "PRISM2nd_label_total when present; blank for older raw tables",
             "pert_time": "pert_time",
             "pert_dose1": "pert_dose",
             "instrument": "instrument",
@@ -1027,6 +1038,8 @@ def standardize_main_singledrug(task_dir: Path) -> TaskResult:
         },
         "protein_name_rule": protein_rule,
         "special_rules": [
+            "sample info csv is read from data/rawdata/update_0623 and replaces the older data/rawdata/singledrug metadata table",
+            "existing data/rawdata/singledrug expression matrix is retained because update_0623 only provides sample metadata and all 28602 sample_id values align",
             "sample info csv is read with multi-encoding fallback for robustness",
             "control values equal to `control` or the row sample_id are normalized into self-control rows",
             "control values that are not valid sample_id references are blanked in the standardized control column and preserved in control_raw",
@@ -1911,22 +1924,59 @@ def standardize_extra_double_task(
     )
 
 
-def parse_ptv1_split_file(path: Path) -> set[tuple[str, str]]:
-    pairs: set[tuple[str, str]] = set()
+PTV1_DRUG_PLACEHOLDERS = {"", "na", "nan", "no", "none", "null"}
+
+
+def clean_ptv1_drug_id(value: object) -> str:
+    text = normalize_free_text(value)
+    if text.lower() in PTV1_DRUG_PLACEHOLDERS:
+        return ""
+    return text
+
+
+def parse_ptv1_drug_id_tokens(value: object) -> list[str]:
+    tokens: list[str] = []
+    for token in re.split(r"\s+", normalize_free_text(value)):
+        cleaned = clean_ptv1_drug_id(token)
+        if cleaned:
+            tokens.append(cleaned)
+    return tokens
+
+
+def canonical_ptv1_drug_key(drug_ids: Iterable[object]) -> tuple[str, ...]:
+    cleaned: list[str] = []
+    for drug_id in drug_ids:
+        value = clean_ptv1_drug_id(drug_id)
+        if value and value not in cleaned:
+            cleaned.append(value)
+    if len(cleaned) <= 1:
+        return tuple(cleaned)
+    return tuple(sorted(cleaned))
+
+
+def format_ptv1_drug_key(drug_key: tuple[str, ...]) -> str:
+    return "+".join(drug_key) if drug_key else "no"
+
+
+def parse_ptv1_cell_from_type(value: object) -> str:
+    text = normalize_free_text(value)
+    if not text or "_" not in text:
+        return ""
+    return text.split("_", 1)[0].strip()
+
+
+def parse_ptv1_split_file(path: Path) -> set[tuple[str, tuple[str, ...]]]:
+    pairs: set[tuple[str, tuple[str, ...]]] = set()
     with path.open("r", encoding="utf-8") as handle:
         for line in handle:
             stripped = line.strip()
             if not stripped:
                 continue
             parts = stripped.split()
-            if len(parts) == 1:
-                cell, pert_id = parts[0].split("_", 1)
-                pairs.add((cell, pert_id))
-                continue
             first_cell, first_pert = parts[0].split("_", 1)
-            pairs.add((first_cell, first_pert))
-            for pert_id in parts[1:]:
-                pairs.add((first_cell, pert_id))
+            drug_key = canonical_ptv1_drug_key([first_pert, *parts[1:]])
+            if drug_key:
+                pairs.add((normalize_free_text(first_cell), drug_key))
     return pairs
 
 
@@ -1952,16 +2002,24 @@ def build_ptv1_control_lookup(
     return representative, counts
 
 
-def build_ptv1_control_assignment(df: pd.DataFrame) -> pd.DataFrame:
+def build_ptv1_control_assignment(
+    df: pd.DataFrame,
+    *,
+    self_control_mask: pd.Series | None = None,
+    self_control_resolution: str = "self_control_by_pert_time_zero",
+) -> pd.DataFrame:
     result = pd.DataFrame(index=df.index)
     result["control"] = pd.Series([""] * len(df), index=df.index, dtype="string")
     result["control_candidate_count"] = 0
     result["control_resolution"] = "unmatched_biorep_cell_plate"
 
     lookup, counts = build_ptv1_control_lookup(df, group_columns=["BioRep", "Cell_plate"])
-    mask_is_control = df["pert_time"].eq(0)
+    if self_control_mask is None:
+        mask_is_control = df["pert_time"].eq(0)
+    else:
+        mask_is_control = self_control_mask.reindex(df.index).fillna(False).astype(bool)
     result.loc[mask_is_control, "control"] = df.loc[mask_is_control, "sample_id"].astype(str)
-    result.loc[mask_is_control, "control_resolution"] = "self_control_by_pert_time_zero"
+    result.loc[mask_is_control, "control_resolution"] = self_control_resolution
 
     keys = [
         (
@@ -2063,24 +2121,67 @@ def standardize_ptv1(task_dir: Path) -> TaskResult:
     )
 
     info_raw["sample_id"] = info_raw["Sample_ID"].astype(str)
-    info_raw["pert_id_clean"] = clean_placeholder_string(info_raw["pert_id"])
-    info_raw["Anchor_id_clean"] = clean_placeholder_string(info_raw["Anchor_id"])
+    raw_pert_id = info_raw["pert_id"].map(clean_ptv1_drug_id).astype("string").fillna("")
+    raw_library_id = info_raw["Library_id"].map(clean_ptv1_drug_id).astype("string").fillna("")
+    raw_anchor_id = info_raw["Anchor_id"].map(clean_ptv1_drug_id).astype("string").fillna("")
+    raw_drugidab_tokens = info_raw["drugIdAB"].map(parse_ptv1_drug_id_tokens)
+    type2_cell = info_raw["type2"].map(parse_ptv1_cell_from_type).astype("string").fillna("")
+    protein_plate = clean_nullable_string(info_raw["protein_plate"])
+    split_cell = type2_cell.where(type2_cell.ne(""), protein_plate)
+
+    combo_mask = raw_library_id.ne("") & raw_anchor_id.ne("")
+    single_mask = raw_pert_id.ne("") & ~combo_mask
+    no_drug_mask = raw_pert_id.eq("") & raw_library_id.eq("") & raw_anchor_id.eq("")
+    malformed_mask = ~(combo_mask | single_mask | no_drug_mask)
+
+    pert_id1_values = raw_pert_id.copy()
+    pert_id2_values = raw_pert_id.copy()
+    pert_id1_values.loc[combo_mask] = raw_library_id.loc[combo_mask]
+    pert_id2_values.loc[combo_mask] = raw_anchor_id.loc[combo_mask]
+    pert_id1_values.loc[no_drug_mask] = ""
+    pert_id2_values.loc[no_drug_mask] = ""
+
+    row_drug_keys = [
+        canonical_ptv1_drug_key([pert1, pert2])
+        for pert1, pert2 in zip(pert_id1_values.tolist(), pert_id2_values.tolist())
+    ]
+    raw_drugidab_keys = [canonical_ptv1_drug_key(tokens) for tokens in raw_drugidab_tokens.tolist()]
+    combo_pair_mismatch_examples: list[dict[str, object]] = []
+    combo_pair_match_values: list[str] = []
+    for idx, is_combo in enumerate(combo_mask.tolist()):
+        if not is_combo:
+            combo_pair_match_values.append("")
+            continue
+        matches = row_drug_keys[idx] == raw_drugidab_keys[idx]
+        combo_pair_match_values.append(str(matches))
+        if not matches and len(combo_pair_mismatch_examples) < 20:
+            combo_pair_mismatch_examples.append(
+                {
+                    "row_index": int(idx),
+                    "sample_id": str(info_raw.at[idx, "sample_id"]),
+                    "Library_id": raw_library_id.iat[idx],
+                    "Anchor_id": raw_anchor_id.iat[idx],
+                    "drugIdAB": normalize_free_text(info_raw.at[idx, "drugIdAB"]),
+                    "standardized_key": format_ptv1_drug_key(row_drug_keys[idx]),
+                    "drugIdAB_key": format_ptv1_drug_key(raw_drugidab_keys[idx]),
+                }
+            )
+
     standard = default_standard_frame(info_raw["sample_id"])
     standard["machineID_new"] = clean_nullable_string(info_raw["machine"])
-    standard["Cell_plate"] = clean_nullable_string(info_raw["protein_plate"])
+    standard["Cell_plate"] = split_cell
     standard["Cell"] = info_raw.apply(
-        lambda row: choose_first_non_empty(row.get("Cell.Line.name"), row.get("protein_plate")),
+        lambda row: choose_first_non_empty(row.get("Cell.Line.name"), split_cell.loc[row.name], row.get("protein_plate")),
         axis=1,
     )
     standard["cell_type"] = "BREAST"
-    standard["pert_id1"] = info_raw["pert_id_clean"]
-    standard["pert_id2"] = info_raw["Anchor_id_clean"]
-    standard = copy_pert_id1_to_blank_pert_id2(standard)
+    standard["pert_id1"] = pert_id1_values
+    standard["pert_id2"] = pert_id2_values
     standard["batch"] = "no"
     standard["pert_time"] = clean_numeric(info_raw["pert_time"])
     library_dose = clean_dose(info_raw["Library_dose"])
     anchor_dose = clean_dose(info_raw["Anchor_dose"])
-    control_mask = standard["pert_time"].eq(0)
+    control_mask = no_drug_mask
     standard["pert_dose1"] = library_dose.where(~control_mask, library_dose.fillna(0))
     standard["pert_dose2"] = anchor_dose.where(~control_mask, anchor_dose.fillna(0))
     standard["PRISM1st_label_total"] = clean_nullable_string(info_raw["NY_label"])
@@ -2135,7 +2236,9 @@ def standardize_ptv1(task_dir: Path) -> TaskResult:
                 "BioRep": standard["BioRep"],
                 "Cell_plate": standard["Cell_plate"],
             }
-        )
+        ),
+        self_control_mask=no_drug_mask,
+        self_control_resolution="self_control_by_no_drug_row",
     )
     standard["control"] = control_assignment["control"]
     standard["control_candidate_count"] = control_assignment["control_candidate_count"]
@@ -2149,17 +2252,35 @@ def standardize_ptv1(task_dir: Path) -> TaskResult:
     val_pairs = parse_ptv1_split_file(split_dir / "val_experiment_type_list.txt")
     test_pairs = parse_ptv1_split_file(split_dir / "test_experiment_type_list.txt")
     split_values = []
-    for row in standard.itertuples(index=False):
-        key = (normalize_free_text(getattr(row, "Cell_plate")), normalize_free_text(getattr(row, "pert_id1")))
-        if key in test_pairs:
+    for cell, drug_key in zip(split_cell.tolist(), row_drug_keys):
+        if not drug_key:
+            split_values.append("no")
+            continue
+        split_key = (normalize_free_text(cell), drug_key)
+        if split_key in test_pairs:
             split_values.append("test")
-        elif key in val_pairs:
+        elif split_key in val_pairs:
             split_values.append("val")
-        elif key in train_pairs:
+        elif split_key in train_pairs:
             split_values.append("train")
         else:
             split_values.append("no")
     standard["data_split"] = split_values
+    standard["ptv1_perturbation_kind"] = np.select(
+        [combo_mask, single_mask, no_drug_mask],
+        ["combo", "single", "no_drug_control"],
+        default="malformed",
+    )
+    standard["ptv1_split_cell"] = split_cell
+    standard["ptv1_canonical_pert_key"] = [format_ptv1_drug_key(drug_key) for drug_key in row_drug_keys]
+    standard["raw_protein_plate"] = protein_plate
+    standard["raw_pert_id"] = raw_pert_id
+    standard["raw_Library_id"] = raw_library_id
+    standard["raw_Anchor_id"] = raw_anchor_id
+    standard["raw_drugIdAB"] = clean_nullable_string(info_raw["drugIdAB"])
+    standard["raw_type2"] = clean_nullable_string(info_raw["type2"])
+    standard["raw_type2_cell"] = type2_cell
+    standard["drugIdAB_pair_match"] = combo_pair_match_values
     standard["source_file_info"] = str(info_path.relative_to(REPO_ROOT))
     standard["source_file_expression"] = str(mixed_path.relative_to(REPO_ROOT))
     standard["source_file_drug_meta"] = str(drug_meta_path.relative_to(REPO_ROOT))
@@ -2222,27 +2343,47 @@ def standardize_ptv1(task_dir: Path) -> TaskResult:
         "column_mapping": {
             "sample_id": "Sample_ID",
             "machineID_new": "machine",
-            "Cell_plate": "protein_plate",
+            "Cell_plate": "cell parsed from type2 when present, otherwise protein_plate",
             "Cell": "Cell.Line.name with protein_plate fallback",
-            "pert_id1": "pert_id with placeholder values blanked",
-            "pert_id2": "Anchor_id with placeholder values blanked; blank single-drug slot copied from pert_id1",
+            "pert_id1": "single-drug rows use pert_id; combo rows use Library_id",
+            "pert_id2": "single-drug rows copy pert_id; combo rows use Anchor_id",
             "pert_dose1": "Library_dose",
             "pert_dose2": "Anchor_dose",
             "PRISM1st_label_total": "NY_label",
-            "control": "rows with pert_time == 0 are self-controls; perturbed rows match a deterministic representative control sample_id within the same (BioRep, protein_plate) group",
-            "data_split": "derived from experiment_type_list using (protein_plate, pert_id)",
+            "control": "rows with no real pert_id/Library_id/Anchor_id are self-controls; perturbed rows match a deterministic representative pert_time==0 control sample_id within the same (BioRep, Cell_plate) group",
+            "data_split": "derived from experiment_type_list using (ptv1_split_cell, canonical single-drug id or unordered Library_id+Anchor_id pair)",
         },
         "protein_name_rule": protein_rule,
         "special_rules": [
             "ptv1 is isolated into its own standardized output root and meta index",
-            "ptv1 aivc contains both single-drug and anchor-drug rows; standardized smiles and targets are merged across pert_id1 / pert_id2 when both are present",
+            "ptv1 aivc contains mixed single-drug and combo rows; combo rows keep the raw two-slot Library_id + Anchor_id semantics",
+            "single-drug rows use pert_id in both perturbation slots so the two-slot model input remains populated",
+            "combo row Library_id/Anchor_id pairs are checked against drugIdAB as an unordered raw pair",
+            "no-drug rows, including nonzero time-course no-drug rows, are treated as controls and excluded from perturbation split anchors",
+            "ptv1_split_cell uses raw type2 cell text when present to resolve the M453(ATCC) vs MDA-MB-453(ATCC) split-list alias",
             "protein parsing uses the first UniProt token embedded in each dot-delimited protein descriptor",
             "unresolved non-UniProt protein columns are excluded from the standardized expression matrix",
         ],
         "issues": [
             {"kind": "unresolved_protein_columns", "count": len(unresolved_protein_columns)},
             {"kind": "ambiguous_control_groups", "count": ambiguous_control_groups},
+            {"kind": "ptv1_combo_drugidab_mismatch", "count": int(sum(value == "False" for value in combo_pair_match_values))},
+            {"kind": "ptv1_malformed_perturbation_rows", "count": int(malformed_mask.sum())},
+            {"kind": "ptv1_no_drug_control_rows", "count": int(no_drug_mask.sum())},
+            {
+                "kind": "ptv1_non_control_data_split_no_rows",
+                "count": int((~no_drug_mask & standard["data_split"].astype("string").fillna("").eq("no")).sum()),
+            },
         ],
+        "ptv1_combo_drugidab_mismatch_examples": combo_pair_mismatch_examples,
+        "ptv1_combo_rows_by_data_split": {
+            str(split_name): int(count)
+            for split_name, count in standard.loc[combo_mask, "data_split"].value_counts(dropna=False).sort_index().items()
+        },
+        "ptv1_perturbation_kind_counts": {
+            str(kind): int(count)
+            for kind, count in standard["ptv1_perturbation_kind"].value_counts(dropna=False).sort_index().items()
+        },
         "unresolved_protein_columns": unresolved_protein_columns,
     }
 
@@ -2275,8 +2416,14 @@ def standardize_ptv1_extra_singledrug(
     main_ptv1_info: pd.DataFrame,
     ptv3_meta: dict[str, object],
 ) -> TaskResult:
-    prediction_path = RAW_ROOT / "ptv1_extra_singledrug" / "test12091214_sample_predictions_E115id.csv"
-    e115_map_path = RAW_ROOT / "ptv1_extra_singledrug" / "ptds4_84drug_E115ID.csv"
+    prediction_path = resolve_existing_path(
+        RAW_ROOT / "ptv1_extra_singledrug" / "test12091214_sample_predictions_E115id.csv",
+        RAW_ROOT / "old" / "test12091214_sample_predictions_E115id.csv",
+    )
+    e115_map_path = resolve_existing_path(
+        RAW_ROOT / "ptv1_extra_singledrug" / "ptds4_84drug_E115ID.csv",
+        RAW_ROOT / "old" / "ptds4_84drug_E115ID.csv",
+    )
 
     raw_prediction = pd.read_csv(prediction_path, low_memory=False)
     selected = select_ptv1_extra_prediction_rows(raw_prediction)
@@ -2498,7 +2645,7 @@ def main() -> None:
         "pert_target_map": single_result.pert_target_map,
     }
     smiles_to_pert, name_to_pert, ambiguous_smiles = parse_smiles_to_existing_maps(
-        safe_read_csv(RAW_ROOT / "singledrug" / "20260403_ptv3_v2_bind_bio_sampleID_machineID_details.csv", low_memory=False)
+        safe_read_csv(PTV3_MAIN_SINGLE_INFO_PATH, low_memory=False)
     )
     extra_target_maps = build_extra_target_maps(
         RAW_ROOT / "extra_singledrug" / "20260318_prism1st_target_gene_uniprotID_map.csv"

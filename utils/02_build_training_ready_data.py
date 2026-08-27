@@ -51,6 +51,12 @@ PTV3_FINAL_TASK_ORDER = [
     "ptv3_extra_doubledrug_nc",
     "ptv3_extra_doubledrug_nature",
 ]
+PTV3_PRISM2_MAIN_SINGLE = "ptv3_main_singledrug_prism2"
+PTV3_PRISM2_MAIN_DOUBLE = "ptv3_main_doubledrug_prism2aux"
+PTV3_PRISM2_MAIN_TASK_ORDER = [
+    PTV3_PRISM2_MAIN_SINGLE,
+    PTV3_PRISM2_MAIN_DOUBLE,
+]
 
 PTV3_SOURCE_TASKS = PTV3_FINAL_TASK_ORDER + ["ptv3_extra_baseline"]
 PTV1_FINAL_TASK_ORDER = [
@@ -84,9 +90,12 @@ class TaskSpec:
     dataset_group: str
     task_kind: str
     merge_main_single_into_feature: bool = False
+    source_task_name: str | None = None
+    single_filter_label_key: str | None = None
+    merge_single_source_task: str = "ptv3_main_singledrug"
 
 
-TASK_SPECS = [
+BASE_TASK_SPECS = [
     TaskSpec("ptv3_main_singledrug", "ptv3", "single"),
     TaskSpec("ptv3_main_doubledrug", "ptv3", "double", merge_main_single_into_feature=True),
     TaskSpec("ptv3_extra_singledrug_mat1_480_faims", "ptv3", "extra"),
@@ -101,6 +110,31 @@ TASK_SPECS = [
     TaskSpec("ptv1_aivc", "ptv1", "ptv1"),
     TaskSpec("ptv1_extra_singledrug", "ptv1", "extra"),
 ]
+
+
+def build_task_specs(*, include_prism2_main_tasks: bool) -> list[TaskSpec]:
+    specs = list(BASE_TASK_SPECS)
+    if include_prism2_main_tasks:
+        specs.extend(
+            [
+                TaskSpec(
+                    PTV3_PRISM2_MAIN_SINGLE,
+                    "ptv3",
+                    "single",
+                    source_task_name="ptv3_main_singledrug",
+                    single_filter_label_key="PRISM2nd_label_total",
+                ),
+                TaskSpec(
+                    PTV3_PRISM2_MAIN_DOUBLE,
+                    "ptv3",
+                    "double",
+                    merge_main_single_into_feature=True,
+                    source_task_name="ptv3_main_doubledrug",
+                    merge_single_source_task=PTV3_PRISM2_MAIN_SINGLE,
+                ),
+            ]
+        )
+    return specs
 
 
 def iso_now() -> str:
@@ -303,6 +337,7 @@ def build_stage2_global_meta(
     dataset_group: str,
     input_root: Path,
     cache: Stage1Cache,
+    final_task_names: list[str],
 ) -> dict[str, Any]:
     stage1_meta = load_json(input_root / dataset_group / "global_meta.json")
     task_names = collect_stage1_task_names(input_root, dataset_group)
@@ -374,7 +409,7 @@ def build_stage2_global_meta(
         "generated_at": iso_now(),
         "source_root": str(input_root / dataset_group),
         "source_task_names": task_names,
-        "task_names": PTV3_FINAL_TASK_ORDER if dataset_group == "ptv3" else PTV1_FINAL_TASK_ORDER,
+        "task_names": final_task_names,
         "protein_index": protein_index,
         "protein_index_to_id": inverse_index(protein_index),
         "pert_index": pert_index,
@@ -490,13 +525,10 @@ def enforce_single_drug_second_slot(
 def sanitize_double_drug_auxiliary_rows(feature_df: pd.DataFrame, *, task_name: str) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Mask synergy labels on merged single-drug rows inside the main double-drug task."""
     feature_df = feature_df.copy()
-    if task_name != "ptv3_main_doubledrug":
+    if task_name not in {"ptv3_main_doubledrug", PTV3_PRISM2_MAIN_DOUBLE}:
         return feature_df, {"applied": False}
 
-    auxiliary_mask = (
-        feature_df["feature_membership"].astype("string").fillna("").str.strip().eq("merged_single_drug")
-        & feature_df["source_task"].astype("string").fillna("").str.strip().eq("ptv3_main_singledrug")
-    )
+    auxiliary_mask = feature_df["feature_membership"].astype("string").fillna("").str.strip().eq("merged_single_drug")
     if "training_label_scope" not in feature_df.columns:
         feature_df["training_label_scope"] = "native_task"
     feature_df.loc[auxiliary_mask, "training_label_scope"] = "single_drug_auxiliary_synergy_masked"
@@ -519,7 +551,7 @@ def sanitize_double_drug_auxiliary_rows(feature_df: pd.DataFrame, *, task_name: 
         "applied": True,
         "auxiliary_single_drug_rows": int(auxiliary_mask.sum()),
         "rule": (
-            "Merged `ptv3_main_singledrug` rows in `ptv3_main_doubledrug` are "
+            f"Merged single-drug rows in `{task_name}` are "
             "single-drug auxiliary rows: PRISM response labels are preserved "
             "for audit and non-synergy uses, while active synergy labels are cleared so "
             "double-drug loss2 is trained only on native double-drug synergy rows. "
@@ -588,14 +620,21 @@ def fetch_control_rows_for_extra_task(task_name: str, own_df: pd.DataFrame, cach
     return pd.concat(control_rows, ignore_index=True, sort=False)
 
 
-def apply_processed_filter(df: pd.DataFrame, *, task_name: str, task_kind: str) -> tuple[pd.DataFrame, dict[str, Any]]:
+def apply_processed_filter(
+    df: pd.DataFrame,
+    *,
+    task_name: str,
+    task_kind: str,
+    single_filter_label_key: str | None = None,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
     df = df.copy()
     control_mask = is_control_frame(df)
     filter_rule = "none"
     kept_mask = pd.Series(True, index=df.index)
     if task_kind == "single":
-        filter_rule = "non-control rows require non-empty PRISM1st_label_total"
-        kept_mask = control_mask | is_non_empty_series(df["PRISM1st_label_total"])
+        label_key = single_filter_label_key or "PRISM1st_label_total"
+        filter_rule = f"non-control rows require non-empty {label_key}"
+        kept_mask = control_mask | is_non_empty_series(df[label_key])
     elif task_kind == "double":
         filter_rule = "non-control rows require non-empty synergy"
         kept_mask = control_mask | is_non_empty_series(df["synergy"])
@@ -783,8 +822,9 @@ def build_task_outputs(
     output_root: Path,
     processed_registry: dict[str, pd.DataFrame],
 ) -> dict[str, Any]:
-    own_df = cache.load_info(spec.task_name)
-    own_df["source_task"] = spec.task_name
+    source_task_name = spec.source_task_name or spec.task_name
+    own_df = cache.load_info(source_task_name)
+    own_df["source_task"] = source_task_name
     own_df["source_row_role"] = "self"
     own_df["feature_membership"] = "primary"
 
@@ -803,6 +843,7 @@ def build_task_outputs(
         combined_processed_df,
         task_name=spec.task_name,
         task_kind=spec.task_kind,
+        single_filter_label_key=spec.single_filter_label_key,
     )
     processed_df, target_audit = append_target_index_columns(processed_df, protein_index=meta["protein_index"])
     processed_df = add_index_columns(processed_df, meta=meta)
@@ -827,8 +868,9 @@ def build_task_outputs(
     feature_df = processed_df.copy()
     auxiliary_label_audit: dict[str, Any] = {"applied": False}
     if spec.merge_main_single_into_feature:
-        merged_single = processed_registry["ptv3_main_singledrug"].copy()
+        merged_single = processed_registry[spec.merge_single_source_task].copy()
         merged_single["feature_membership"] = "merged_single_drug"
+        merged_single["merged_from_task"] = spec.merge_single_source_task
         feature_df = pd.concat([feature_df, merged_single], ignore_index=True, sort=False)
     feature_df = add_common_columns(feature_df, task_context=spec.task_name)
     feature_df, auxiliary_label_audit = sanitize_double_drug_auxiliary_rows(feature_df, task_name=spec.task_name)
@@ -871,6 +913,9 @@ def build_task_outputs(
         "task_name": spec.task_name,
         "dataset_group": spec.dataset_group,
         "task_kind": spec.task_kind,
+        "source_task_name": source_task_name,
+        "single_filter_label_key": spec.single_filter_label_key,
+        "merge_single_source_task": spec.merge_single_source_task if spec.merge_main_single_into_feature else None,
         "rows": {
             "own_rows_before_append": int(len(own_df)),
             "appended_control_rows_before_filter": int(len(appended_control_df)),
@@ -905,7 +950,13 @@ def build_dataset_group(
     task_specs: list[TaskSpec],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     cache = Stage1Cache(input_root, dataset_group)
-    meta = build_stage2_global_meta(dataset_group=dataset_group, input_root=input_root, cache=cache)
+    final_task_names = [spec.task_name for spec in task_specs if spec.dataset_group == dataset_group]
+    meta = build_stage2_global_meta(
+        dataset_group=dataset_group,
+        input_root=input_root,
+        cache=cache,
+        final_task_names=final_task_names,
+    )
     ensure_dir(output_root / dataset_group)
     dump_json(output_root / dataset_group / "global_meta.json", meta)
 
@@ -931,6 +982,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build training-ready ProteinTalk artifacts from stage-1 outputs")
     parser.add_argument("--input-root", default=str(DEFAULT_INPUT_ROOT), help="Stage-1 standardized root")
     parser.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT), help="Training-ready output root")
+    parser.add_argument("--dataset-group", choices=["ptv1", "ptv3", "all"], default="all")
+    parser.add_argument(
+        "--include-prism2-main-tasks",
+        action="store_true",
+        help="Also build PRISM2-labeled PTV3 main single and PRISM2-aux double tasks.",
+    )
     return parser.parse_args()
 
 
@@ -939,24 +996,27 @@ def main() -> None:
     input_root = Path(args.input_root)
     output_root = Path(args.output_root)
     ensure_dir(output_root)
+    task_specs = build_task_specs(include_prism2_main_tasks=args.include_prism2_main_tasks)
 
-    ptv3_meta, ptv3_tasks = build_dataset_group(
-        dataset_group="ptv3",
-        input_root=input_root,
-        output_root=output_root,
-        task_specs=TASK_SPECS,
-    )
-    ptv1_meta, ptv1_tasks = build_dataset_group(
-        dataset_group="ptv1",
-        input_root=input_root,
-        output_root=output_root,
-        task_specs=TASK_SPECS,
-    )
+    groups = ["ptv1", "ptv3"] if args.dataset_group == "all" else [args.dataset_group]
+    metas: dict[str, dict[str, Any]] = {}
+    task_manifests_by_group: dict[str, dict[str, Any]] = {}
+    for dataset_group in groups:
+        meta, task_manifests = build_dataset_group(
+            dataset_group=dataset_group,
+            input_root=input_root,
+            output_root=output_root,
+            task_specs=task_specs,
+        )
+        metas[dataset_group] = meta
+        task_manifests_by_group[dataset_group] = task_manifests
 
     audit = {
         "generated_at": iso_now(),
         "input_root": str(input_root),
         "output_root": str(output_root),
+        "dataset_group_arg": args.dataset_group,
+        "include_prism2_main_tasks": bool(args.include_prism2_main_tasks),
         "implementation_notes": [
             "Stage-2 outputs are written to `data/training_ready/` so stage-1 standardized artifacts remain untouched.",
             "Stage-2 control rows use the explicit rule `control == sample_id` or `control == control`.",
@@ -971,24 +1031,17 @@ def main() -> None:
             "For `ptv1_extra_singledrug`, no additional stage-2 label filter is applied after the stage-1 unique `(cell, E115_id)` selection. For other `*_extra_singledrug*` tasks, the non-control row filter uses PRISM2nd_label_total. For any `*_extra_doubledrug*` task, the non-control row filter uses PRISM1st_label_total.",
             "PTV1 is kept in its own index space and does not share global metadata with PTV3.",
         ],
-        "dataset_groups": {
-            "ptv3": {
-                "global_meta_path": str(output_root / "ptv3" / "global_meta.json"),
-                "task_names": PTV3_FINAL_TASK_ORDER,
-                "protein_index_size": len(ptv3_meta["protein_index"]),
-                "pert_index_size": len(ptv3_meta["pert_index"]),
-            },
-            "ptv1": {
-                "global_meta_path": str(output_root / "ptv1" / "global_meta.json"),
-                "task_names": PTV1_FINAL_TASK_ORDER,
-                "protein_index_size": len(ptv1_meta["protein_index"]),
-                "pert_index_size": len(ptv1_meta["pert_index"]),
-            },
-        },
+        "dataset_groups": {},
         "tasks": {},
     }
-    audit["tasks"].update(ptv3_tasks)
-    audit["tasks"].update(ptv1_tasks)
+    for dataset_group, meta in metas.items():
+        audit["dataset_groups"][dataset_group] = {
+            "global_meta_path": str(output_root / dataset_group / "global_meta.json"),
+            "task_names": list(meta["task_names"]),
+            "protein_index_size": len(meta["protein_index"]),
+            "pert_index_size": len(meta["pert_index"]),
+        }
+        audit["tasks"].update(task_manifests_by_group[dataset_group])
     dump_json(output_root / "file_audit.json", audit)
 
 

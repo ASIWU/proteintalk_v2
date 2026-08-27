@@ -10,7 +10,7 @@ Prefix: `20260608_ptv1_cell_llm_tune_v1`
 - Wrote the final report to `docs/2026-06-08_ptv1_frozen_cell_llm_fine_tune_report.md`.
 - Consolidated reporter outputs:
   - `logs/20260608_ptv1_cell_llm_tune_v1_fine_tune_results.md`;
-  - `outputs/20260608_ptv1_cell_llm_tune_v1_fine_tune_results.tsv`.
+  - `outputs/2026-06/2026-06-08/20260608_ptv1_cell_llm_tune_v1_fine_tune_results.tsv`.
 
 ## Results
 

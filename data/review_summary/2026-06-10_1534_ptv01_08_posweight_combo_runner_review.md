@@ -37,7 +37,7 @@ bash scripts/run_ptv01_08_posweight_combo_tune.sh
 - Completed jobs: `6/6` with status `0`.
 - Report artifacts:
   - `logs/smoke_ptv01_08_posweight_combo_20260610_153327_param_search_report.md`
-  - `outputs/smoke_ptv01_08_posweight_combo_20260610_153327_param_search_report.tsv`
+  - `outputs/2026-06/2026-06-10/smoke_ptv01_08_posweight_combo_20260610_153327_param_search_report.tsv`
   - `logs/smoke_ptv01_08_posweight_combo_20260610_153327_gpu_job_summary.tsv`
 
 ## Manifest Audit

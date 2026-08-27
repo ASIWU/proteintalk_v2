@@ -9,8 +9,8 @@
 
 - Full report: `logs/20260608_cell_celltype_llm_clip10_tune_v1_full_param_search_report.md`
 - Selected report: `logs/20260608_cell_celltype_llm_clip10_tuned_selected_v1_cell_drug_dose_time_eval.md`
-- Selected CSV: `outputs/20260608_cell_celltype_llm_clip10_tuned_selected_v1_cell_drug_dose_time_eval.csv`
-- Selected JSON: `outputs/20260608_cell_celltype_llm_clip10_tuned_selected_v1_cell_drug_dose_time_eval.json`
+- Selected CSV: `outputs/2026-06/2026-06-08/20260608_cell_celltype_llm_clip10_tuned_selected_v1_cell_drug_dose_time_eval.csv`
+- Selected JSON: `outputs/2026-06/2026-06-08/20260608_cell_celltype_llm_clip10_tuned_selected_v1_cell_drug_dose_time_eval.json`
 - Formal document: `docs/2026-06-09_cell_celltype_llm_clip10_tuned_results.md`
 
 ## Audit

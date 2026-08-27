@@ -10,7 +10,7 @@ Prefix: `20260608_ptv1_cell_llm_exp13_from_exp11_graphon_v2_mse050_drop010`
 - Added `scripts/ptv1/run_ptv1_exp13_from_exp11_selected.sh`.
 - Added `scripts/ptv1/report_ptv1_exp13_from_exp11_selected.py`.
 - Wrote the official report to `docs/2026-06-08_ptv1_exp13_from_exp11_graphon_rerun_report.md`.
-- Wrote the TSV report to `outputs/20260608_ptv1_cell_llm_exp13_from_exp11_graphon_v2_mse050_drop010_exp13_from_exp11_selected_report.tsv`.
+- Wrote the TSV report to `outputs/2026-06/2026-06-08/20260608_ptv1_cell_llm_exp13_from_exp11_graphon_v2_mse050_drop010_exp13_from_exp11_selected_report.tsv`.
 
 ## Results
 

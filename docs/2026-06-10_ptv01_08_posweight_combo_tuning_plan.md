@@ -95,11 +95,11 @@
 - Report 要求：
 - 生成 screen report、full report、final report 三类输出：
   - `logs/20260610_ptv01_08_posweight_combo_v1_param_search_report.md`
-  - `outputs/20260610_ptv01_08_posweight_combo_v1_param_search_report.tsv`
+  - `outputs/2026-06/2026-06-10/20260610_ptv01_08_posweight_combo_v1_param_search_report.tsv`
   - `docs/2026-06-10_ptv01_08_posweight_combo_tuning_report.md`
   - `logs/20260610_ptv01_08_posweight_combo_selected_v1_cell_drug_dose_time_eval.md`
-  - `outputs/20260610_ptv01_08_posweight_combo_selected_v1_cell_drug_dose_time_eval.csv`
-  - `outputs/20260610_ptv01_08_posweight_combo_selected_v1_cell_drug_dose_time_eval.json`
+  - `outputs/2026-06/2026-06-10/20260610_ptv01_08_posweight_combo_selected_v1_cell_drug_dose_time_eval.csv`
+  - `outputs/2026-06/2026-06-10/20260610_ptv01_08_posweight_combo_selected_v1_cell_drug_dose_time_eval.json`
 - 所有 Markdown/TSV/CSV 指标保留 4 位小数。
 - screen report 至少包含：
   - stage、rank、config、folds、complete；

@@ -130,7 +130,7 @@ Exp_13 reference epoch policy:
 - Raw mean epoch: `5.8`.
 - Selected epoch: `6`.
 - Applied all-PTV1 max epochs: `7`.
-- Prediction output: `outputs/20260608_ptv1_cell_llm_v1_all_ptv1_for_extra/ptv1_extra_singledrug/predictions.parquet`.
+- Prediction output: `outputs/2026-06/2026-06-08/20260608_ptv1_cell_llm_v1_all_ptv1_for_extra/ptv1_extra_singledrug/predictions.parquet`.
 
 Per-cell exp_13 results:
 
@@ -152,12 +152,12 @@ Runtime summary:
 | train | `20260608_ptv1_cell_llm_v1_ptv1_unseen_drug_fold3` | 70 | `checkpoints/20260608_ptv1_cell_llm_v1_ptv1_unseen_drug_fold3` |
 | train | `20260608_ptv1_cell_llm_v1_ptv1_unseen_drug_fold4` | 53 | `checkpoints/20260608_ptv1_cell_llm_v1_ptv1_unseen_drug_fold4` |
 | train | `20260608_ptv1_cell_llm_v1_all_ptv1_for_extra` | 20 | `checkpoints/20260608_ptv1_cell_llm_v1_all_ptv1_for_extra` |
-| infer | `20260608_ptv1_cell_llm_v1_all_ptv1_for_extra` | 7 | `outputs/20260608_ptv1_cell_llm_v1_all_ptv1_for_extra/ptv1_extra_singledrug` |
+| infer | `20260608_ptv1_cell_llm_v1_all_ptv1_for_extra` | 7 | `outputs/2026-06/2026-06-08/20260608_ptv1_cell_llm_v1_all_ptv1_for_extra/ptv1_extra_singledrug` |
 
 Generated reports:
 
 - `logs/20260608_ptv1_cell_llm_v1_ptv1_exp_results.md`.
-- `outputs/20260608_ptv1_cell_llm_v1_ptv1_exp_results.csv`.
+- `outputs/2026-06/2026-06-08/20260608_ptv1_cell_llm_v1_ptv1_exp_results.csv`.
 
 Validation:
 
@@ -234,7 +234,7 @@ Reference epoch policy:
 - Checkpoint policy: use `last.ckpt`.
 
 Prediction output:
-`outputs/20260603_2037_ptv1_all_ptv1_for_extra/ptv1_extra_singledrug/predictions.parquet`.
+`outputs/2026-06/2026-06-03/20260603_2037_ptv1_all_ptv1_for_extra/ptv1_extra_singledrug/predictions.parquet`.
 
 | group | AUROC | AUPRC | n-AUPRC | count | pos | neg |
 |---|---:|---:|---:|---:|---:|---:|
@@ -255,7 +255,7 @@ Prediction output:
 | train | `20260603_2037_ptv1_ptv1_unseen_drug_fold3` | 58 | `checkpoints/20260603_2037_ptv1_ptv1_unseen_drug_fold3` |
 | train | `20260603_2037_ptv1_ptv1_unseen_drug_fold4` | 56 | `checkpoints/20260603_2037_ptv1_ptv1_unseen_drug_fold4` |
 | train | `20260603_2037_ptv1_all_ptv1_for_extra` | 18 | `checkpoints/20260603_2037_ptv1_all_ptv1_for_extra` |
-| infer | `20260603_2037_ptv1_all_ptv1_for_extra` | 7 | `outputs/20260603_2037_ptv1_all_ptv1_for_extra/ptv1_extra_singledrug` |
+| infer | `20260603_2037_ptv1_all_ptv1_for_extra` | 7 | `outputs/2026-06/2026-06-03/20260603_2037_ptv1_all_ptv1_for_extra/ptv1_extra_singledrug` |
 
 Runtime summary file:
 `logs/20260603_2037_ptv1_runtime_summary.tsv`.

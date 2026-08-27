@@ -17,6 +17,7 @@ from _shared import REPO_ROOT, load_json
 
 
 DEFAULT_OUTPUT_ROOT = REPO_ROOT / "data" / "standardized"
+DEFAULT_PTV1_EXPERIMENT_TYPE_DIR = REPO_ROOT / "data" / "rawdata" / "ptv1" / "experiment_type_list"
 EXPECTED_TASKS = ("ptv1_aivc", "ptv1_extra_singledrug")
 
 
@@ -65,6 +66,82 @@ def clean_text(value: object) -> str:
     if text.lower() in {"nan", "none", "null"}:
         return ""
     return text
+
+
+PTV1_DRUG_PLACEHOLDERS = {"", "na", "nan", "no", "none", "null"}
+
+
+def clean_ptv1_drug_id(value: object) -> str:
+    text = clean_text(value)
+    if text.lower() in PTV1_DRUG_PLACEHOLDERS:
+        return ""
+    return text
+
+
+def parse_ptv1_drug_id_tokens(value: object) -> list[str]:
+    return [cleaned for token in re.split(r"\s+", clean_text(value)) if (cleaned := clean_ptv1_drug_id(token))]
+
+
+def canonical_ptv1_drug_key(drug_ids: list[object]) -> tuple[str, ...]:
+    cleaned: list[str] = []
+    for drug_id in drug_ids:
+        value = clean_ptv1_drug_id(drug_id)
+        if value and value not in cleaned:
+            cleaned.append(value)
+    if len(cleaned) <= 1:
+        return tuple(cleaned)
+    return tuple(sorted(cleaned))
+
+
+def parse_ptv1_canonical_key(value: object) -> tuple[str, ...]:
+    text = clean_text(value)
+    if not text or text.lower() in PTV1_DRUG_PLACEHOLDERS:
+        return ()
+    return canonical_ptv1_drug_key(text.split("+"))
+
+
+def ptv1_row_drug_key(df: pd.DataFrame, row_index: int) -> tuple[str, ...]:
+    if "ptv1_canonical_pert_key" in df.columns:
+        parsed = parse_ptv1_canonical_key(df.at[row_index, "ptv1_canonical_pert_key"])
+        if parsed:
+            return parsed
+    return canonical_ptv1_drug_key([df.at[row_index, "pert_id1"], df.at[row_index, "pert_id2"]])
+
+
+def ptv1_split_cell_value(df: pd.DataFrame, row_index: int) -> str:
+    if "ptv1_split_cell" in df.columns:
+        value = clean_text(df.at[row_index, "ptv1_split_cell"])
+        if value:
+            return value
+    return clean_text(df.at[row_index, "Cell_plate"])
+
+
+def parse_ptv1_experiment_type_file(path: Path) -> set[tuple[str, tuple[str, ...]]]:
+    pairs: set[tuple[str, tuple[str, ...]]] = set()
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            parts = stripped.split()
+            first_cell, first_pert = parts[0].split("_", 1)
+            drug_key = canonical_ptv1_drug_key([first_pert, *parts[1:]])
+            if drug_key:
+                pairs.add((clean_text(first_cell), drug_key))
+    return pairs
+
+
+def load_ptv1_experiment_type_pairs(split_dir: Path = DEFAULT_PTV1_EXPERIMENT_TYPE_DIR) -> set[tuple[str, tuple[str, ...]]]:
+    pairs: set[tuple[str, tuple[str, ...]]] = set()
+    for filename in ("train_experiment_type_list.txt", "val_experiment_type_list.txt", "test_experiment_type_list.txt"):
+        pairs.update(parse_ptv1_experiment_type_file(split_dir / filename))
+    return pairs
+
+
+def is_control_frame(df: pd.DataFrame) -> pd.Series:
+    control = df["control"].astype("string").fillna("").str.strip()
+    sample_id = df["sample_id"].astype("string").fillna("").str.strip()
+    return control.eq(sample_id) | control.str.lower().eq("control")
 
 
 def validate_main_controls(info: pd.DataFrame, failures: list[str]) -> dict[str, int]:
@@ -121,6 +198,64 @@ def validate_task(task_name: str, payload: dict[str, Any], failures: list[str]) 
 
     if task_name == "ptv1_aivc":
         control_summary = validate_main_controls(info, failures)
+        control_mask = is_control_frame(info)
+        non_control = ~control_mask
+        pert1 = info["pert_id1"].astype("string").fillna("").str.strip()
+        pert2 = info["pert_id2"].astype("string").fillna("").str.strip()
+        missing_slots = non_control & (pert1.eq("") | pert2.eq(""))
+        if missing_slots.any():
+            failures.append(f"ptv1_aivc: non-control rows require non-empty pert_id1/pert_id2; bad={int(missing_slots.sum())}")
+
+        if "ptv1_perturbation_kind" in info.columns:
+            kind = info["ptv1_perturbation_kind"].astype("string").fillna("").str.strip()
+            no_drug_not_control = kind.eq("no_drug_control") & ~control_mask
+            if no_drug_not_control.any():
+                failures.append(f"ptv1_aivc: no_drug_control rows must be self-controls; bad={int(no_drug_not_control.sum())}")
+            malformed = kind.eq("malformed")
+            if malformed.any():
+                failures.append(f"ptv1_aivc: malformed perturbation rows found; bad={int(malformed.sum())}")
+            combo_mask = kind.eq("combo")
+        else:
+            combo_mask = non_control & pert1.ne(pert2)
+
+        required_raw_columns = {"raw_Library_id", "raw_Anchor_id", "raw_drugIdAB"}
+        if required_raw_columns.issubset(info.columns):
+            pair_mismatch = 0
+            slot_mismatch = 0
+            for row in info.loc[combo_mask].itertuples(index=False):
+                raw_library = clean_ptv1_drug_id(getattr(row, "raw_Library_id"))
+                raw_anchor = clean_ptv1_drug_id(getattr(row, "raw_Anchor_id"))
+                drugidab_key = canonical_ptv1_drug_key(parse_ptv1_drug_id_tokens(getattr(row, "raw_drugIdAB")))
+                raw_slot_key = canonical_ptv1_drug_key([raw_library, raw_anchor])
+                pair_mismatch += int(raw_slot_key != drugidab_key)
+                slot_mismatch += int(
+                    clean_ptv1_drug_id(getattr(row, "pert_id1")) != raw_library
+                    or clean_ptv1_drug_id(getattr(row, "pert_id2")) != raw_anchor
+                )
+            if pair_mismatch:
+                failures.append(f"ptv1_aivc: combo raw Library_id/Anchor_id must match drugIdAB pair; bad={pair_mismatch}")
+            if slot_mismatch:
+                failures.append(f"ptv1_aivc: combo rows must standardize pert_id1=Library_id and pert_id2=Anchor_id; bad={slot_mismatch}")
+        else:
+            failures.append(f"ptv1_aivc: missing raw combo audit columns: {sorted(required_raw_columns - set(info.columns))}")
+
+        split_values = info["data_split"].astype("string").fillna("").str.strip()
+        non_control_split_no = non_control & split_values.eq("no")
+        raw_split_pairs = load_ptv1_experiment_type_pairs()
+        raw_covered_split_no = 0
+        for row_index in info.index[non_control_split_no]:
+            key = (ptv1_split_cell_value(info, int(row_index)), ptv1_row_drug_key(info, int(row_index)))
+            raw_covered_split_no += int(key in raw_split_pairs)
+        if raw_covered_split_no:
+            failures.append(
+                "ptv1_aivc: non-control rows whose key exists in experiment_type_list must not have data_split=no; "
+                f"bad={raw_covered_split_no}"
+            )
+        combo_split_counts = split_values.loc[combo_mask].value_counts(dropna=False).to_dict()
+        for split_name in ("train", "val", "test"):
+            if int(combo_split_counts.get(split_name, 0)) == 0:
+                failures.append(f"ptv1_aivc: combo rows missing from standardized data_split={split_name}")
+
         labels = set(info["PRISM1st_label_total"].astype("string").fillna("").str.strip().unique())
         if not {"Y", "N"}.issubset(labels):
             failures.append(f"ptv1_aivc: PRISM1st_label_total should contain Y and N labels; found={sorted(labels)}")
@@ -128,6 +263,8 @@ def validate_task(task_name: str, payload: dict[str, Any], failures: list[str]) 
             f"{task_name}\trows={matrix_shape[0]}\tproteins={matrix_shape[1]}"
             f"\tself_controls={control_summary['self_control_count']}"
             f"\tmissing_controls={control_summary['missing_control_count']}"
+            f"\tcombo_rows={int(combo_mask.sum())}"
+            f"\traw_split_unassigned_non_controls={int(non_control_split_no.sum())}"
         )
 
     pert1 = info["pert_id1"].astype("string").fillna("").str.strip()

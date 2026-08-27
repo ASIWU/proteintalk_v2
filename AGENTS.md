@@ -10,3 +10,7 @@ Use `conda activate flow_v2` to activate python env (/mnt/shared-storage-user/wu
 
 ## Codebase reference
 - the old version of this codebase is in /mnt/shared-storage-user/beam/wuhao/H100/proteintalk/ProteinTalkv2
+
+## Smoke artifacts
+- After a smoke test finishes (whether it passes or fails), record the needed validation evidence and delete that smoke run's temporary output directories, sidecar reports, attribution artifacts, and smoke-specific logs. Keep only formal-run artifacts unless the user explicitly asks to retain smoke files.
+- Resolve and review the exact smoke paths before deletion, and never delete formal outputs as part of smoke cleanup.

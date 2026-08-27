@@ -9,8 +9,8 @@ This is the completed tuning run for the graph + frozen Cell LLM + frozen cell-t
 - Final selected prefix: `20260608_cell_celltype_llm_clip10_tuned_selected_v1`
 - Full report: `logs/20260608_cell_celltype_llm_clip10_tune_v1_full_param_search_report.md`
 - Final selected Markdown: `logs/20260608_cell_celltype_llm_clip10_tuned_selected_v1_cell_drug_dose_time_eval.md`
-- Final selected CSV: `outputs/20260608_cell_celltype_llm_clip10_tuned_selected_v1_cell_drug_dose_time_eval.csv`
-- Final selected JSON: `outputs/20260608_cell_celltype_llm_clip10_tuned_selected_v1_cell_drug_dose_time_eval.json`
+- Final selected CSV: `outputs/2026-06/2026-06-08/20260608_cell_celltype_llm_clip10_tuned_selected_v1_cell_drug_dose_time_eval.csv`
+- Final selected JSON: `outputs/2026-06/2026-06-08/20260608_cell_celltype_llm_clip10_tuned_selected_v1_cell_drug_dose_time_eval.json`
 - Launch logs: `logs/20260609_cell_celltype_llm_clip10_tune_v1_full_launch.log`, `logs/20260609_cell_celltype_llm_clip10_tuned_selected_v1_auto_launch.log`
 
 ## Completion Audit
@@ -151,4 +151,4 @@ Baseline prefix: `20260608_cell_celltype_llm_clip10_selected_v1`.
 - The strongest gains versus the untuned cell+cell-type selected run are exp03 AUPRC `+0.0159` and exp06 AUPRC `+0.0112`.
 - exp05 no-graph drops by AUPRC `-0.0060`, which is acceptable for the diagnostic ablation and increases the graph-enabled gap relative to exp01.
 - exp07 extra single improves by AUPRC `+0.0055`; exp08 extra double loses AUPRC `-0.0053` but improves AUROC `+0.0070`.
-- Full detail, including all folds and extra subsets, is retained in `logs/20260608_cell_celltype_llm_clip10_tuned_selected_v1_cell_drug_dose_time_eval.md` and `outputs/20260608_cell_celltype_llm_clip10_tuned_selected_v1_cell_drug_dose_time_eval.csv`.
+- Full detail, including all folds and extra subsets, is retained in `logs/20260608_cell_celltype_llm_clip10_tuned_selected_v1_cell_drug_dose_time_eval.md` and `outputs/2026-06/2026-06-08/20260608_cell_celltype_llm_clip10_tuned_selected_v1_cell_drug_dose_time_eval.csv`.

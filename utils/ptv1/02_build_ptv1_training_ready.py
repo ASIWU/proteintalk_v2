@@ -27,7 +27,11 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     args.output_root.mkdir(parents=True, exist_ok=True)
-    task_specs = [spec for spec in builder.TASK_SPECS if spec.dataset_group == "ptv1"]
+    if hasattr(builder, "build_task_specs"):
+        all_task_specs = builder.build_task_specs(include_prism2_main_tasks=False)
+    else:
+        all_task_specs = builder.TASK_SPECS
+    task_specs = [spec for spec in all_task_specs if spec.dataset_group == "ptv1"]
     meta, task_manifests = builder.build_dataset_group(
         dataset_group="ptv1",
         input_root=args.input_root,

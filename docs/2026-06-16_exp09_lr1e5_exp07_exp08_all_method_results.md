@@ -6,8 +6,8 @@ This document expands the exp09 `LEARNING_RATE=1e-5` external evaluation into th
 
 - Exp09 run prefix: `20260615_2010_exp09_lr1e5_v1`
 - Checkpoint directory: `checkpoints/20260615_2010_exp09_lr1e5_v1_unified_all_single_double_for_extra`
-- Source CSV: `outputs/20260615_2010_exp09_lr1e5_v1_unified_all_single_double_for_extra_valid_oracle_eval.csv`
-- Source JSON: `outputs/20260615_2010_exp09_lr1e5_v1_unified_all_single_double_for_extra_valid_oracle_eval.json`
+- Source CSV: `outputs/2026-06/2026-06-15/20260615_2010_exp09_lr1e5_v1_unified_all_single_double_for_extra_valid_oracle_eval.csv`
+- Source JSON: `outputs/2026-06/2026-06-15/20260615_2010_exp09_lr1e5_v1_unified_all_single_double_for_extra_valid_oracle_eval.json`
 - Previous detailed report: `logs/20260615_2138_exp09_lr1e5_exp07_exp08_detailed_results.md`
 
 ## Result Semantics

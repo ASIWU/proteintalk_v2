@@ -1,5 +1,16 @@
 # Data Standardization Session Summary
 
+## 2026-07-02 12:14 HKT PTV1 Library/Anchor Combo Standardization Fix
+
+- Fixed PTV1 AIVC combo standardization so raw double-drug rows now use `pert_id1=Library_id` and `pert_id2=Anchor_id`; single-drug rows keep the two-slot single semantics with both slots set to the single `pert_id`.
+- Reworked PTV1 `experiment_type_list` parsing to create one canonical `(cell, drug_key)` per line, where combo entries use an unordered canonical Library/Anchor pair instead of being split into independent single-drug keys.
+- Updated PTV1 fixed split and exp_12 fold construction to use the same canonical key; exp_12 now groups by single drug id or canonical combo pair to prevent Library/Anchor order leakage across train/valid/test.
+- Added validation for non-control two-slot coverage, raw `drugIdAB` pair agreement, real combo perturbation indices, nonzero combo rows in fixed train/valid/test, and exp_12 canonical-pair disjointness.
+- Rebuilt PTV1 standardized, training-ready, split, and derived artifacts under `flow_v2`; standardized validation passed with `ptv1_aivc rows=15002`, `combo_rows=4570`, and `raw_split_unassigned_non_controls=16`; training-ready validation passed for `ptv1_aivc feature=15002x5576` and `ptv1_extra_singledrug feature=222x5576`.
+- Added lazy PyG import in `model/training_ready_models.py` so `fast_delta` startup no longer imports the full `torch_geometric` graph stack unless a PDI graph model is instantiated.
+- Smoke run `20260702_ptv1_library_anchor_fix_smoke` completed in tmux `gpu3` after detecting that the worker exposes its single H200 as local CUDA device `0`; the formal suite `20260702_ptv1_library_anchor_fix_v1` then completed in the same tmux session with `GPU_IDS=0` and fresh graph cache `graph_cache/ptv1_library_anchor_fix_v1`.
+- Formal exp_11/12/13 rerun completed 32 candidates and 288 runtime rows with status `0` for every row; final reports are `logs/20260702_ptv1_library_anchor_fix_v1_fine_tune_results.md`, `outputs/2026-07/2026-07-02/20260702_ptv1_library_anchor_fix_v1_fine_tune_results.tsv`, and `docs/2026-07-02_ptv1_library_anchor_fix_exp11_12_13_results.md`.
+
 ## 2026-06-19 08:16 HKT PTV1 README Retrain Full Cell/Cell-Type Completion
 
 - Completed the README/script-aligned full retrain for the available PTV1 `cell_5fold` and `cell_type_5fold` tasks under `baseline/ptv2_benchmark_260514/PTV1_model_20260428`.
@@ -49,8 +60,8 @@ Completed the corrected Cell LLM clip10 tuning goal from `docs/2026-06-04-goal.m
 - Promoted full prefix `20260604_cell_llm_clip10_tune_v1_full` completed `100/100` manifests and wrote `logs/20260604_cell_llm_clip10_tune_v1_full_param_search_report.md`.
 - Final selected prefix `20260604_cell_llm_clip10_tuned_selected_v1` completed `32/32` manifests and wrote:
   - `logs/20260604_cell_llm_clip10_tuned_selected_v1_cell_drug_dose_time_eval.md`
-  - `outputs/20260604_cell_llm_clip10_tuned_selected_v1_cell_drug_dose_time_eval.csv`
-  - `outputs/20260604_cell_llm_clip10_tuned_selected_v1_cell_drug_dose_time_eval.json`
+  - `outputs/2026-06/2026-06-04/20260604_cell_llm_clip10_tuned_selected_v1_cell_drug_dose_time_eval.csv`
+  - `outputs/2026-06/2026-06-04/20260604_cell_llm_clip10_tuned_selected_v1_cell_drug_dose_time_eval.json`
 - Final selected configs: stage1 `mse050_target_pdi`, stage2 `covdrop010_drop010`, stage3 `covdrop010_lr1e4`, stage4 `drop020_mseinactive010`.
 - Final manifest audit passed: `cell_llm_mode=frozen`, `cell_llm_summary.embedding_rows=74`, no `cell_type_llm` manifest key, `exp05` graph mode `zero`, other final experiments graph mode `real`.
 - exp07 used selected exp01 mean-nearest reference epoch `10` and `last.ckpt`; exp08 used selected exp06 mean-nearest reference epoch `9` and `last.ckpt`.
@@ -74,8 +85,8 @@ Added `scripts/reinfer_extra_from_existing_training.sh` to reuse an already trai
 Validation:
 
 - `bash -n scripts/reinfer_extra_from_existing_training.sh` passed.
-- Bounded extra-single smoke reused `checkpoints/20260510_extra_single_all_train_infer_all_single_for_extra/epoch=49.ckpt` and wrote 6 one-row extra-single outputs to `outputs/20260511_reinfer_existing_single_smoke`.
-- Bounded extra-double smoke reused an existing double smoke checkpoint and wrote 3 one-row extra-double outputs to `outputs/20260511_reinfer_existing_double_smoke`.
+- Bounded extra-single smoke reused `checkpoints/20260510_extra_single_all_train_infer_all_single_for_extra/epoch=49.ckpt` and wrote 6 one-row extra-single outputs to `outputs/2026-05/2026-05-11/20260511_reinfer_existing_single_smoke`.
+- Bounded extra-double smoke reused an existing double smoke checkpoint and wrote 3 one-row extra-double outputs to `outputs/2026-05/2026-05-11/20260511_reinfer_existing_double_smoke`.
 
 ## 2026-05-11 12:32 HKT 0509 Wrapper Reference-Epoch Update
 
@@ -136,7 +147,7 @@ Validation:
 
 新增 [scripts/show_extra_results.py](/mnt/shared-storage-gpfs2/beam-gpfs02/wuhao/PTV/proteintalk_v2/scripts/show_extra_results.py:1)，用于汇总 `infer.py` 生成的 extra single / extra double 输出目录中的 `metrics.json`。
 
-- 默认读取 `outputs/20260510_extra_single_all_train_infer_all_single_for_extra`，直接打印 extra single 各数据集的 AUROC / AUPRC / ACC / valid / positive / negative / prediction rows。
+- 默认读取 `outputs/2026-05/2026-05-10/20260510_extra_single_all_train_infer_all_single_for_extra`，直接打印 extra single 各数据集的 AUROC / AUPRC / ACC / valid / positive / negative / prediction rows。
 - 默认根据 `run_manifest.json` 中的 `task_head` 选择指标头，因此 extra single 使用 `response`，extra double 可直接使用 `synergy`。
 - 支持传入任意 output 目录或单个 `metrics.json`，并可通过 `--all-heads`、`--format markdown|csv`、`--csv-out`、`--include-paths` 做更完整检查。
 
@@ -1088,7 +1099,7 @@ python utils/01_validate_standardized_outputs.py
   - patched 8-GPU bounded smoke 通过：`EXP_PREFIX=20260509_confidence2_smoke FOLDS=0 MAX_EPOCHS=1 LIMIT_TRAIN_BATCHES=1 LIMIT_VAL_BATCHES=1 LIMIT_TEST_BATCHES=1 INFER_LIMIT_BATCHES=1 BATCH_SIZE=2 INFER_BATCH_SIZE=2 bash scripts/run_ptv3_training_experiments.sh`；
   - smoke 覆盖 8 个 training jobs：single pert/cell_type/cell、single no-MSE、single no-PDI、double canonical pair、all-single、all-single+double；所有 checkpoint manifests 为 `run_status=fit_completed` 且 best checkpoint 存在；
   - smoke 覆盖全部 9 个 extra inference tasks；每个 bounded output manifest 写出 2 predictions；
-  - 新 inference manifest axis probe 通过：`outputs/20260509_confidence2_manifest_axis_probe_double/run_manifest.json` 记录 external/checkpoint protein axis 差异；
+  - 新 inference manifest axis probe 通过：`outputs/2026-05/2026-05-09/20260509_confidence2_manifest_axis_probe_double/run_manifest.json` 记录 external/checkpoint protein axis 差异；
   - 最终 `nvidia-smi --query-compute-apps` 无 active GPU compute process。
 - 结论边界：当前 strategy 在 code path、data contract、split leakage、checkpoint binding、stale-output guard 和 extra inference execution 上没有已知 loophole。该结论不等价于保证长训练后的 biological/scientific metric 一定收敛。
 - 新增复查记录：`data/review_summary/2026-05-09_1723_ddp_dedup_loss_split_contract_review.md`。
@@ -1485,7 +1496,7 @@ python utils/01_validate_standardized_outputs.py
   - Current best candidate for these splits is full-field covariate UNK dropout `0.15` with `MSE_WEIGHT=0.1`.
 - Validation:
   - `python -m py_compile train.py infer.py dataset/training_ready_fast_dataset.py model/fast_delta_model.py model/fast_lightning.py scripts/check_wandb_auth.py` passed;
-  - smoke tested fast `infer.py` on a covariate UNK checkpoint with one test batch and wrote `outputs/smoke_covunk_infer_20260522/predictions.parquet`.
+  - smoke tested fast `infer.py` on a covariate UNK checkpoint with one test batch and wrote `outputs/2026-05/2026-05-22/smoke_covunk_infer_20260522/predictions.parquet`.
 
 ## 2026-05-22 18:52 HKT Unseen Cell Representation/Loss Exploration
 
@@ -1923,8 +1934,8 @@ python utils/01_validate_standardized_outputs.py
   - `41/41` commands exited with status `0`;
   - `32` train commands and `9` inference commands completed.
 - Cell-drug evaluation outputs:
-  - `outputs/20260601_cell_drug_selected_full_v1_cell_drug_time_eval.csv`;
-  - `outputs/20260601_cell_drug_selected_full_v1_cell_drug_time_eval.json`;
+  - `outputs/2026-06/2026-06-01/20260601_cell_drug_selected_full_v1_cell_drug_time_eval.csv`;
+  - `outputs/2026-06/2026-06-01/20260601_cell_drug_selected_full_v1_cell_drug_time_eval.json`;
   - `logs/20260601_cell_drug_selected_full_v1_cell_drug_time_eval.md`.
 - Summary metrics:
   - exp01 single unseen drug:
@@ -1979,8 +1990,8 @@ python utils/01_validate_standardized_outputs.py
 - Re-evaluated the existing `20260601_cell_drug_selected_full_v1` predictions without retraining.
 - New result document: `docs/2026-06-01_cell_drug_dose_time_eval_results.md`.
 - Dose-aware output files:
-  - `outputs/20260601_cell_drug_selected_full_v1_cell_drug_dose_time_eval.csv`;
-  - `outputs/20260601_cell_drug_selected_full_v1_cell_drug_dose_time_eval.json`;
+  - `outputs/2026-06/2026-06-01/20260601_cell_drug_selected_full_v1_cell_drug_dose_time_eval.csv`;
+  - `outputs/2026-06/2026-06-01/20260601_cell_drug_selected_full_v1_cell_drug_dose_time_eval.json`;
   - `logs/20260601_cell_drug_selected_full_v1_cell_drug_dose_time_eval.md`.
 - exp06 dose-aware collapsed metrics:
   - `cell-drug-dose-bylasttime`: AUROC `0.808264`, AUPRC `0.753058`, nAUPRC `1.867977`;
@@ -2000,8 +2011,8 @@ python utils/01_validate_standardized_outputs.py
   - `Fold Detail` for fold-level rows.
 - Regenerated:
   - `logs/20260601_cell_drug_selected_full_v1_cell_drug_dose_time_eval.md`;
-  - `outputs/20260601_cell_drug_selected_full_v1_cell_drug_dose_time_eval.csv`;
-  - `outputs/20260601_cell_drug_selected_full_v1_cell_drug_dose_time_eval.json`.
+  - `outputs/2026-06/2026-06-01/20260601_cell_drug_selected_full_v1_cell_drug_dose_time_eval.csv`;
+  - `outputs/2026-06/2026-06-01/20260601_cell_drug_selected_full_v1_cell_drug_dose_time_eval.json`.
 - Updated `docs/2026-06-01_cell_drug_dose_time_eval_results.md` so exp07 reports each available mat subset separately and exp08 reports `guomics`, `nature`, and `nc` separately.
 - No retraining was run; this was a reporting/presentation correction over existing prediction files.
 - Validation:
@@ -2017,8 +2028,8 @@ python utils/01_validate_standardized_outputs.py
 - The grouping follows the earlier 2026-05-26 `test_label` reporting contract and uses the `test_label` column carried into prediction metadata.
 - Regenerated:
   - `logs/20260601_cell_drug_selected_full_v1_cell_drug_dose_time_eval.md`;
-  - `outputs/20260601_cell_drug_selected_full_v1_cell_drug_dose_time_eval.csv`;
-  - `outputs/20260601_cell_drug_selected_full_v1_cell_drug_dose_time_eval.json`.
+  - `outputs/2026-06/2026-06-01/20260601_cell_drug_selected_full_v1_cell_drug_dose_time_eval.csv`;
+  - `outputs/2026-06/2026-06-01/20260601_cell_drug_selected_full_v1_cell_drug_dose_time_eval.json`.
 - Updated `docs/2026-06-01_cell_drug_dose_time_eval_results.md` so exp08 reports `guomics`, `nature`, and `nc` each under the three required groups.
 - `mean_extra` continues to aggregate only `combined` rows, so exp08 test-label groups are not double-counted in the convenience aggregate.
 - No retraining or inference was run; this was a reporting correction over existing prediction files.
@@ -2061,8 +2072,8 @@ python utils/01_validate_standardized_outputs.py
 - Final result document: `docs/2026-06-01_llm_celltype_embedding_experiment_results.md`.
 - Final report files:
   - `logs/20260601_llm_celltype_full_v1_cell_drug_dose_time_eval.md`;
-  - `outputs/20260601_llm_celltype_full_v1_cell_drug_dose_time_eval.csv`;
-  - `outputs/20260601_llm_celltype_full_v1_cell_drug_dose_time_eval.json`.
+  - `outputs/2026-06/2026-06-01/20260601_llm_celltype_full_v1_cell_drug_dose_time_eval.csv`;
+  - `outputs/2026-06/2026-06-01/20260601_llm_celltype_full_v1_cell_drug_dose_time_eval.json`.
 - Key mean5 results:
   - exp01 original AUROC/AUPRC/n-AUPRC: `0.896777 / 0.668358 / 5.644481`;
   - exp01 cell-drug-dose-avgtime: `0.897524 / 0.670102 / 5.681576`;
@@ -2108,8 +2119,8 @@ python utils/01_validate_standardized_outputs.py
   - `20260602_1220_llm_targetmag_v1`
   - `20260602_1226_llm_targetmag_seed7_v1`
 - Final output:
-  - `outputs/20260602_llm_targetmag_seed42_seed7_ensemble_fold0/predictions.parquet`
-  - `outputs/20260602_llm_targetmag_seed42_seed7_ensemble_fold0/metrics.json`
+  - `outputs/2026-06/2026-06-02/20260602_llm_targetmag_seed42_seed7_ensemble_fold0/predictions.parquet`
+  - `outputs/2026-06/2026-06-02/20260602_llm_targetmag_seed42_seed7_ensemble_fold0/metrics.json`
 - Final fold0 test metrics:
   - AUROC `0.922863`;
   - AUPRC `0.856793`;
@@ -2292,8 +2303,8 @@ python utils/01_validate_standardized_outputs.py
   - exp08 extra double: `0.639328 / 0.094090 / 2.134296`.
 - Generated report outputs:
   - `logs/20260604_cell_llm_dose_clip10_selected_v1_cell_drug_dose_time_eval.md`;
-  - `outputs/20260604_cell_llm_dose_clip10_selected_v1_cell_drug_dose_time_eval.csv`;
-  - `outputs/20260604_cell_llm_dose_clip10_selected_v1_cell_drug_dose_time_eval.json`;
+  - `outputs/2026-06/2026-06-04/20260604_cell_llm_dose_clip10_selected_v1_cell_drug_dose_time_eval.csv`;
+  - `outputs/2026-06/2026-06-04/20260604_cell_llm_dose_clip10_selected_v1_cell_drug_dose_time_eval.json`;
   - `logs/20260604_cell_llm_dose_clip10_selected_v1_runtime_summary.tsv`.
 - Updated result document:
   - `docs/2026-06-02_llm_dose_graphallowed_selected_results.md`.
@@ -2378,7 +2389,7 @@ python utils/01_validate_standardized_outputs.py
   - exp_13 reference epochs were `3, 2, 6, 18, 0`, raw mean `5.8`, selected epoch `6`, all-train max epochs `7`.
 - Generated report files:
   - `logs/20260608_ptv1_cell_llm_v1_ptv1_exp_results.md`;
-  - `outputs/20260608_ptv1_cell_llm_v1_ptv1_exp_results.csv`.
+  - `outputs/2026-06/2026-06-08/20260608_ptv1_cell_llm_v1_ptv1_exp_results.csv`.
 - Updated result document:
   - `docs/2026-06-03_ptv1_experiment_results.md`.
 - Added review record:
@@ -2414,7 +2425,7 @@ python utils/01_validate_standardized_outputs.py
   - exp_12 fold0 one epoch/one train batch completed on GPU;
   - exp_13 direct produced 218 predictions;
   - exp_13 all-train used exp_11 epoch `0`, trained one epoch, and produced 218 predictions;
-  - smoke report files: `logs/20260608_1240_ptv1_fine_tune_smoke_fine_tune_results.md` and `outputs/20260608_1240_ptv1_fine_tune_smoke_fine_tune_results.tsv`.
+  - smoke report files: `logs/20260608_1240_ptv1_fine_tune_smoke_fine_tune_results.md` and `outputs/2026-06/2026-06-08/20260608_1240_ptv1_fine_tune_smoke_fine_tune_results.tsv`.
 - Added review record:
   - `data/review_summary/2026-06-08_1242_ptv1_fine_tune_search_tooling_review.md`.
 - Validation:
@@ -2433,7 +2444,7 @@ python utils/01_validate_standardized_outputs.py
   - exp_13 constrained best: `mse025_graph_off`, direct extra AUPRC `0.604631`, with exp_11 AUPRC `0.890020`.
 - Generated result files:
   - `logs/20260608_ptv1_cell_llm_tune_v1_fine_tune_results.md`;
-  - `outputs/20260608_ptv1_cell_llm_tune_v1_fine_tune_results.tsv`;
+  - `outputs/2026-06/2026-06-08/20260608_ptv1_cell_llm_tune_v1_fine_tune_results.tsv`;
   - `docs/2026-06-08_ptv1_frozen_cell_llm_fine_tune_report.md`.
 - Formal audit passed:
   - 224/224 training manifests;
@@ -2474,7 +2485,7 @@ python utils/01_validate_standardized_outputs.py
   - all_train manifest recorded `selected_epoch=5` and `applied_max_epochs=6`.
 - Wrote the official rerun report:
   - `docs/2026-06-08_ptv1_exp13_from_exp11_graphon_rerun_report.md`;
-  - `outputs/20260608_ptv1_cell_llm_exp13_from_exp11_graphon_v2_mse050_drop010_exp13_from_exp11_selected_report.tsv`.
+  - `outputs/2026-06/2026-06-08/20260608_ptv1_cell_llm_exp13_from_exp11_graphon_v2_mse050_drop010_exp13_from_exp11_selected_report.tsv`.
 - Validation passed:
   - `bash -n scripts/ptv1/*.sh scripts/ptv3_experiment_common.sh`;
   - `python -m py_compile scripts/ptv1/*.py train.py infer.py`;
@@ -2507,7 +2518,7 @@ python utils/01_validate_standardized_outputs.py
 - Compared against `20260604_cell_llm_clip10_tuned_selected_v1`; comparison audit returned `audit_errors=0` and showed AUPRC gains for exp05 (`+0.010999`) and exp08 (`+0.009759`), with decreases for exp01/02/03/04/06/07.
 - Wrote reports:
   - `docs/2026-06-08_cell_celltype_llm_clip10_selected_report.md`;
-  - `outputs/20260608_cell_celltype_llm_clip10_selected_v1_cell_celltype_llm_comparison.tsv`;
+  - `outputs/2026-06/2026-06-08/20260608_cell_celltype_llm_clip10_selected_v1_cell_celltype_llm_comparison.tsv`;
   - `logs/20260608_cell_celltype_llm_clip10_selected_v1_cell_celltype_llm_comparison.md`;
   - `data/review_summary/2026-06-08_2117_cell_celltype_llm_selected_review.md`.
 
@@ -2559,7 +2570,7 @@ python utils/01_validate_standardized_outputs.py
   - exp13 oracle best `mse050_lr1e4`, AUPRC/AUROC/nAUPRC `0.636390 / 0.652502 / 1.238688`, epoch `16`, rows `218`.
 - Wrote the formal PTV1 report:
   - `docs/2026-06-09_ptv1_cell_celltype_llm_exp11_13_tuned_results.md`;
-  - generated artifacts `logs/20260609_ptv1_cell_celltype_llm_tune_v2_api_celltype_cell_celltype_tune_results.md` and `outputs/20260609_ptv1_cell_celltype_llm_tune_v2_api_celltype_cell_celltype_tune_results.tsv`.
+  - generated artifacts `logs/20260609_ptv1_cell_celltype_llm_tune_v2_api_celltype_cell_celltype_tune_results.md` and `outputs/2026-06/2026-06-09/20260609_ptv1_cell_celltype_llm_tune_v2_api_celltype_cell_celltype_tune_results.tsv`.
 - Validation passed:
   - Cell LLM and `cell_type` LLM embedding `--validate-only` checks;
   - `bash -n scripts/ptv1/*.sh scripts/ptv3_experiment_common.sh`;
@@ -2656,9 +2667,9 @@ python utils/01_validate_standardized_outputs.py
 - Audited the completed `20260610_ptv01_08_posweight_combo_v1` and `20260610_ptv01_08_posweight_combo_selected_v1` artifacts requested by `docs/2026-06-10_ptv01_08_posweight_combo_tuning_plan.md`.
 - Found detailed raw reports in `logs/` and `outputs/`, but no durable long-form report under `docs/`.
 - Added `docs/2026-06-10_ptv01_08_posweight_combo_tuning_report.md`, generated from:
-  - `outputs/20260610_ptv01_08_posweight_combo_v1_param_search_report.tsv`;
-  - `outputs/20260610_ptv01_08_posweight_combo_v1_full_param_search_report.tsv`;
-  - `outputs/20260610_ptv01_08_posweight_combo_selected_v1_cell_drug_dose_time_eval.csv`;
+  - `outputs/2026-06/2026-06-10/20260610_ptv01_08_posweight_combo_v1_param_search_report.tsv`;
+  - `outputs/2026-06/2026-06-10/20260610_ptv01_08_posweight_combo_v1_full_param_search_report.tsv`;
+  - `outputs/2026-06/2026-06-10/20260610_ptv01_08_posweight_combo_selected_v1_cell_drug_dose_time_eval.csv`;
   - selected-run `run_manifest.json` files;
   - GPU/runtime summary TSVs.
 - The report records screen/full/final selected artifacts, selected configs, reference epochs, manifest audit, GPU distribution, final mean metrics, delta vs `20260604_cell_llm_clip10_tuned_selected_v1`, extra subset/source deltas, full screen table, and fold detail.
@@ -2683,10 +2694,10 @@ python utils/01_validate_standardized_outputs.py
   - standard-compatible: P1 double, P2 single/double subset, P4 double, P5 single/double subset;
   - non-standard/exploratory: P3 single/double.
 - Full inference completed successfully on GPU 0:
-  - single outputs under `outputs/20260611_patientVali260605_exp07_single/`;
-  - double outputs under `outputs/20260611_patientVali260605_exp08_double/`;
-  - merged prediction table under `outputs/20260611_patientVali260605_combined/combined_predictions.csv`;
-  - strict standard-compatible subset under `outputs/20260611_patientVali260605_combined/combined_predictions_standard_only.csv`.
+  - single outputs under `outputs/2026-06/2026-06-11/20260611_patientVali260605_exp07_single/`;
+  - double outputs under `outputs/2026-06/2026-06-11/20260611_patientVali260605_exp08_double/`;
+  - merged prediction table under `outputs/2026-06/2026-06-11/20260611_patientVali260605_combined/combined_predictions.csv`;
+  - strict standard-compatible subset under `outputs/2026-06/2026-06-11/20260611_patientVali260605_combined/combined_predictions_standard_only.csv`.
 - Added review record:
   - `data/review_summary/2026-06-11_2253_patient_vali260605_inference_review.md`.
 
@@ -2723,8 +2734,8 @@ python utils/01_validate_standardized_outputs.py
   - single-drug tasks use exp_07 checkpoint `epoch=5-step=426.ckpt`;
   - double-drug tasks use exp_08 checkpoint `epoch=2-step=234.ckpt`.
 - Full v2 inference completed successfully:
-  - per-task outputs under `outputs/20260611_patientVali260605v2_exp07_single/` and `outputs/20260611_patientVali260605v2_exp08_double/`;
-  - combined outputs: `outputs/20260611_patientVali260605v2_combined_predictions.parquet` and `outputs/20260611_patientVali260605v2_combined_predictions.csv`;
+  - per-task outputs under `outputs/2026-06/2026-06-11/20260611_patientVali260605v2_exp07_single/` and `outputs/2026-06/2026-06-11/20260611_patientVali260605v2_exp08_double/`;
+  - combined outputs: `outputs/2026-06/2026-06-11/20260611_patientVali260605v2_combined_predictions.parquet` and `outputs/2026-06/2026-06-11/20260611_patientVali260605v2_combined_predictions.csv`;
   - total prediction rows: 876.
 - Added review record:
   - `data/review_summary/2026-06-11_2343_patient_vali260605v2_feature_infer_review.md`.
@@ -2760,8 +2771,8 @@ python utils/01_validate_standardized_outputs.py
 - Full v3 inference completed:
   - single-drug tasks use exp_07 checkpoint `epoch=5-step=426.ckpt`;
   - double-drug tasks use exp_08 checkpoint `epoch=2-step=234.ckpt`;
-  - per-task outputs under `outputs/20260612_patientVali260605v3_exp07_single/` and `outputs/20260612_patientVali260605v3_exp08_double/`;
-  - combined outputs: `outputs/20260612_patientVali260605v3_combined_predictions.parquet` and `outputs/20260612_patientVali260605v3_combined_predictions.csv`;
+  - per-task outputs under `outputs/2026-06/2026-06-12/20260612_patientVali260605v3_exp07_single/` and `outputs/2026-06/2026-06-12/20260612_patientVali260605v3_exp08_double/`;
+  - combined outputs: `outputs/2026-06/2026-06-12/20260612_patientVali260605v3_combined_predictions.parquet` and `outputs/2026-06/2026-06-12/20260612_patientVali260605v3_combined_predictions.csv`;
   - total prediction rows: 876.
 - Added review record:
   - `data/review_summary/2026-06-12_1139_patient_vali260605v3_p3_reprocess_feature_infer_review.md`.
@@ -2781,7 +2792,7 @@ python utils/01_validate_standardized_outputs.py
 ## 2026-06-12 17:26 HKT Patient Validation 260605 v3 Readable Output Export
 
 - Added `utils/15_prepare_patient_validation_outputs.py` to prepare shareable patient-validation inference outputs from the existing v3 prediction artifacts without rerunning inference.
-- Generated `outputs/0612v3/`:
+- Generated `outputs/2026-06/2026-06-12/0612v3/`:
   - `combined_predictions_readable.csv`, with readable dataset, task, cell, drug-pair, model-source, score-name, unified `prediction_score`, and rank columns;
   - `per_task_csv/*.csv`, converting all 8 per-task parquet prediction files to readable CSV;
   - `task_summary.csv`, `dataset_summary.csv`, `manifest.json`, and `README.md`.
@@ -2814,7 +2825,7 @@ python utils/01_validate_standardized_outputs.py
 - Inference sources:
   - exp07 all-epoch checkpoints from `checkpoints/20260612_ptv01_08_posweight_combo_selected_v1_allckpt_exp07_extra_single_all_train_infer_all_single_for_extra`;
   - exp08 all-epoch checkpoints from `checkpoints/20260612_ptv01_08_posweight_combo_selected_v1_allckpt_exp08_extra_double_all_train_infer_all_single_double_for_extra`.
-- Generated raw per-task inference outputs under `outputs/20260612_patientVali260605v3_all_epoch_ckpts/` and readable outputs under `outputs/0612v3_all_epoch_ckpts/`:
+- Generated raw per-task inference outputs under `outputs/2026-06/2026-06-12/20260612_patientVali260605v3_all_epoch_ckpts/` and readable outputs under `outputs/2026-06/2026-06-12/0612v3_all_epoch_ckpts/`:
   - `combined_predictions_readable.csv`;
   - `checkpoint_summary.csv`;
   - `task_checkpoint_summary.csv`;
@@ -2825,7 +2836,7 @@ python utils/01_validate_standardized_outputs.py
   - 33 task/checkpoint prediction files were produced;
   - combined readable rows: 2,676 total, including 96 single-drug rows from 6 exp07 checkpoints and 2,580 double-drug rows from 3 exp08 checkpoints;
   - no missing `prediction_score` values;
-  - final all-epoch rows (`exp07_epoch005` and `exp08_epoch002`) exactly match the previous `outputs/0612v3` final inference rows: 876/876 merged, max absolute score difference `0.0`.
+  - final all-epoch rows (`exp07_epoch005` and `exp08_epoch002`) exactly match the previous `outputs/2026-06/2026-06-12/0612v3` final inference rows: 876/876 merged, max absolute score difference `0.0`.
 
 ## 2026-06-15 10:50 HKT exp09 Unified-Head All-Data Training Script
 
@@ -2860,16 +2871,16 @@ python utils/01_validate_standardized_outputs.py
 - Added detailed result documentation:
   - `docs/2026-06-15_exp09_unified_head_valid_oracle_results.md`;
   - generated report `logs/20260615_1101_exp09_selectedref_v1_unified_all_single_double_for_extra_valid_oracle_eval.md`;
-  - generated CSV/JSON under `outputs/20260615_1101_exp09_selectedref_v1_unified_all_single_double_for_extra_valid_oracle_eval.*`.
+  - generated CSV/JSON under `outputs/2026-06/2026-06-15/20260615_1101_exp09_selectedref_v1_unified_all_single_double_for_extra_valid_oracle_eval.*`.
 - Optimized `scripts/report_cell_drug_time_eval.py::collapsed_frame()` from a per-group Python loop to vectorized pandas aggregation after the first report subprocess stalled for about 50 CPU-minutes; regenerated the report from the same completed prediction files without rerunning training or inference.
 
 ## 2026-06-15 15:20 HKT exp09 Patient Validation 260605 v3 First-50-Epoch Checkpoint Inference
 
-- Added `utils/17_infer_patient_validation_exp09_all_epoch_ckpts.py` to run patientVali260605v3 inference over exp09 unified-head epoch checkpoints and export outputs matching the previous `outputs/0612v3_all_epoch_ckpts` structure.
+- Added `utils/17_infer_patient_validation_exp09_all_epoch_ckpts.py` to run patientVali260605v3 inference over exp09 unified-head epoch checkpoints and export outputs matching the previous `outputs/2026-06/2026-06-12/0612v3_all_epoch_ckpts` structure.
 - Reused existing standardized patient validation features from `data/training_ready_patientVali260605v3`; source raw data is `data/rawdata/ptv2drug_patientVali260605`.
 - Ran only the first 50 exp09 checkpoints, epochs `0..49`, from `checkpoints/20260615_1101_exp09_selectedref_v1_unified_all_single_double_for_extra`.
 - Used unified task-head inference for both single-drug sensitivity and double-drug synergy tasks; readable `prediction_score` is exported from `pred_task_prob`.
-- Generated raw per-task inference outputs under `outputs/20260615_patientVali260605v3_exp09_all_epoch_ckpts/` and readable outputs under `outputs/0615v3_exp09_all_epoch_ckpts/`:
+- Generated raw per-task inference outputs under `outputs/2026-06/2026-06-15/20260615_patientVali260605v3_exp09_all_epoch_ckpts/` and readable outputs under `outputs/2026-06/2026-06-15/0615v3_exp09_all_epoch_ckpts/`:
   - `combined_predictions_readable.csv`;
   - `checkpoint_summary.csv`;
   - `task_checkpoint_summary.csv`;
@@ -2881,3 +2892,562 @@ python utils/01_validate_standardized_outputs.py
   - combined readable rows: 43,800 total, including 800 single-drug rows and 43,000 double-drug rows;
   - 50 checkpoint labels and 8 patient validation tasks are present;
   - no missing `prediction_score` values; `score_name` is consistently `pred_task_prob`.
+
+## 2026-06-20 14:56 HKT PTV3 Label-Aligned PTV1 cell_5fold Benchmark
+
+- Diagnosed the PTV3 vs PTV1-flow unseen-cell gap by comparing fold2 predictions on shared `(Cell, pert_id1, pert_id2)` keys:
+  - PTV1-flow fold2 AP on its own labels: `0.887203`;
+  - the strongest original PTV3 candidate ranked PTV3 PRISM labels well but ranked PTV1 labels poorly;
+  - the main gap source was label/objective mismatch, not only architecture.
+- Added PTV1-flow-inspired PTV3 response-trajectory branch support:
+  - `model/fast_delta_model.py` now supports `response_trajectory_mode={off,summary,drug,gate}`, trajectory projection dimensions/seeds/detach, and fixed/learnable trajectory logit scales;
+  - `train.py`, `infer.py`, `scripts/ptv3_experiment_common.sh`, and `scripts/report_cell_drug_time_eval.py` forward the new train/infer/manifest arguments.
+- Added experiment tooling:
+  - `scripts/run_ptv3_cell_delta_screen.sh` for parallel fold/method screens on one or more GPUs;
+  - `scripts/eval_ptv3_cell_checkpoint_policy.py` for best-vs-last checkpoint policy checks;
+  - parameterized `scripts/exp_03_single_cell_5fold.sh` with `TASK_NAME` and `SPLIT_STRATEGY_PREFIX`.
+- Added label-aligned benchmark artifacts:
+  - `scripts/build_ptv3_ptv1_cellfold_task.py` builds `data/training_ready/ptv3/tasks/ptv3_main_singledrug_ptv1_cell_5fold` and matching `ptv1_cell_5fold_fold{0..4}` splits from PTV3 features plus PTV1 cell_5fold labels;
+  - PTV1 `-1` labels are retained as masked labels, and valid label counts match the PTV1-flow summary exactly: folds `505, 1008, 472, 1065, 623`;
+  - `dataset/training_ready_fast_dataset.py` now falls back to normal `np.load` when GPFS mmap fails.
+- Added corrected comparison tooling:
+  - `scripts/evaluate_ptv3_vs_ptv1_cellfold.py` reconstructs PTV1 valid experiment key order from raw split files because the PTV1 baseline CSV `experiment_type` column is not reliable after `-1` masking.
+- GPU execution was run in `gpu2:brainctl` with `flow_v2`.
+- Final selected PTV3 label-aligned config:
+  - prefix `20260620_ptv3_ptv1label_cell_v1_covdrop020_mse075`;
+  - task `ptv3_main_singledrug_ptv1_cell_5fold`;
+  - split prefix `ptv1_cell_5fold_fold`;
+  - method `covdrop020_mse075`.
+- Final 5-fold results:
+  - PTV3 mean `cell-drug-dose-avgtime` AUPRC/AP: `0.862943`, AUROC: `0.934197`;
+  - PTV1-flow cell_5fold mean AP from corrected comparison: `0.860341`, AUROC: `0.923850`;
+  - PTV1-flow summary mean AUPRC: `0.859920`;
+  - PTV3 exceeds PTV1-flow mean by about `+0.0026` AP and `+0.0030` against the summary AUPRC.
+- Result artifacts:
+  - `outputs/2026-06/2026-06-20/20260620_ptv3_ptv1label_cell_v1_covdrop020_mse075_cell_drug_time_eval_5fold.csv`;
+  - `outputs/2026-06/2026-06-20/20260620_ptv3_ptv1label_cell_v1_covdrop020_mse075_vs_ptv1_5fold.csv`;
+  - fold predictions under `outputs/2026-06/2026-06-20/20260620_ptv3_ptv1label_cell_v1_covdrop020_mse075_cell_drug_fold_predictions/exp03/`;
+  - training summary `logs/20260620_ptv3_ptv1label_cell_v1_covdrop020_mse075_5fold_train_summary.tsv`.
+
+## 2026-06-23 13:04 HKT update_0623 PTV3 Single-Drug Raw Data Refresh
+
+- Read `docs/Data_Process_1.md` through `docs/Data_Process_4.md` and `docs/Training_guideline.md` before changing the pipeline.
+- Updated `utils/00_standardize_rawdata.py` so `ptv3_main_singledrug` now reads its sample metadata from `data/rawdata/update_0623/260513ptv3_EGH_28602sampinfo_with_smiles_check_prism1_label_add_prism2_label_add_machine_details.csv`.
+- Kept the existing main single-drug proteome matrix `data/rawdata/singledrug/20250113_ptv3_unique_mat_28602samp_10982prot_finall_v2.csv`, because `update_0623` contains metadata only and its 28,602 `sample_id` values exactly match the expression matrix.
+- Preserved the new main single-drug `PRISM2nd_label_total` column in standardized and training-ready artifacts; active exp_01-05 response labels still use `PRISM1st_label_total`.
+- Added a narrow fallback for existing PTV1 extra single-drug raw files under `data/rawdata/old/`, allowing the full Stage 1 standardizer to complete in this checkout.
+- Rebuilt local artifacts with `flow_v2`:
+  - `utils/00_standardize_rawdata.py`;
+  - `utils/01_validate_standardized_outputs.py`;
+  - `utils/02_build_training_ready_data.py`;
+  - `utils/09_build_data_splits.py --dataset-group all`;
+  - `utils/03_validate_training_ready_outputs.py`.
+- Validation passed after split regeneration. Refreshed `ptv3_main_singledrug` counts:
+  - standardized: `28602` rows, `10982` proteins;
+  - training-ready processed/feature: `18359` rows, `10982` proteins;
+  - processed PRISM2 counts: `NA=10791`, `non-responsive=5653`, `sensitive=1915`;
+  - all non-control single-drug rows keep `pert_id2 == pert_id1`.
+- Launched exp_01 through exp_08 in tmux session `gpu2` on the GPU worker.
+  - First prefix `20260623_130056_update0623` stalled during W&B initialization and was interrupted.
+  - Relaunched with W&B disabled: `EXP_PREFIX=20260623_130336_update0623_nowandb`, `GPU_IDS=0`, `DEVICES=1`, `LOGGER_BACKEND=none`, `LOG_TO_WANDB=0`, `WANDB_MODE=disabled`.
+  - The no-W&B run completed exp_01 through exp_08 with `32` successful train rows and `9` successful inference rows in `logs/20260623_130336_update0623_nowandb_runtime_summary.tsv`; no nonzero status rows were present.
+  - Checkpoints were written under `checkpoints/20260623_130336_update0623_nowandb*`, including all exp_01-06 5-fold checkpoints plus `all_single_for_extra` and `all_single_double_for_extra`.
+  - Extra inference outputs were written under `outputs/2026-06/2026-06-23/20260623_130336_update0623_nowandb_all_single_for_extra/` and `outputs/2026-06/2026-06-23/20260623_130336_update0623_nowandb_all_single_double_for_extra/`, with `9` `predictions.parquet` files total.
+  - Detailed exp_01-exp_08 result tables were recorded in `docs/2026-06-23_update0623_exp01_08_results.md`.
+
+## 2026-06-25 18:07 HKT exp_21-exp_26 PRISM2 Main-Label Branch
+
+- Added an isolated PRISM2 main-label training-ready root at `data/training_ready_prism2_main` without overwriting `data/training_ready`.
+- Added opt-in Stage 2 support in `utils/02_build_training_ready_data.py`:
+  - `ptv3_main_singledrug_prism2` reads the same stage-1 `ptv3_main_singledrug` expression/source rows but filters non-control rows on `PRISM2nd_label_total`;
+  - `ptv3_main_doubledrug_prism2aux` keeps native double-drug `synergy` labels while merging train-only auxiliary single-drug rows from `ptv3_main_singledrug_prism2`.
+- Added split and validation support for the two PRISM2 branch tasks in `utils/09_build_data_splits.py` and `utils/03_validate_training_ready_outputs.py`.
+- Added `utils/npy_io.py` and routed training/inference graph/expression `.npy` loads through a mmap-safe fallback, because the GPFS mount can raise `OSError: [Errno 19] No such device` for `np.load(..., mmap_mode="r")`.
+- Added experiment scripts:
+  - `scripts/build_exp21_26_prism2_data.sh`;
+  - `scripts/exp_21_single_prism2_pert_stratified_5fold.sh` through `scripts/exp_26_double_prism2aux_pert_pair_5fold.sh`;
+  - `scripts/run_exp_21_26_prism2_main.sh`;
+  - conditional graph rebuild script `scripts/exp21_26_rebuild_prism2_graphs.sh`.
+- Built the PRISM2 data with `flow_v2`; validation passed.
+  - `ptv3_main_singledrug_prism2`: `8157` feature rows, `424` controls, `7733` non-control PRISM2-labeled rows;
+  - PRISM2 non-control counts: `non-responsive=5727`, `sensitive=2006`;
+  - included `165` PRISM2-only rows that old PRISM1 filtering removed, and excluded PRISM1-only rows.
+- Graph/embedding reuse check passed:
+  - old and new PTV3 `pert_index` and `protein_index` hashes are identical;
+  - reused `data/training_ready/ptv3/derived` via `data/training_ready_prism2_main/ptv3/derived`;
+  - DDI shape `(6131, 6131)`, PDI shape `(6131, 11345)`, PPI shape `(11345, 11345)`, drug embedding rows `6131`, protein embedding rows `11345`;
+  - graph rebuild was not required.
+- Launched exp_21-exp_26 training in tmux session `gpu2` with:
+  - `TRAINING_READY_ROOT=data/training_ready_prism2_main`;
+  - `EXP_PREFIX=20260625_1807_prism2_exp21_26_nowandb`;
+  - `LOGGER_BACKEND=tensorboard`, `LOG_TO_WANDB=0`;
+  - runtime summary target `logs/20260625_1807_prism2_exp21_26_nowandb_runtime_summary.tsv`.
+- All exp_21-exp_26 training completed successfully: 30 train/test rows, all status `0`.
+- Added `training_ready_root` to new `train.py` run manifests so later runs record the resolved training-ready root directly.
+- Detailed data, graph reuse, and result tables are recorded in `docs/2026-06-25_exp21_26_prism2_main_results.md`.
+
+## 2026-06-25 19:48 HKT exp_27-exp_28 PRISM2 Extra Inference
+
+- Added exp_27/exp_28 scripts mirroring exp_07/exp_08 on the PRISM2 branch:
+  - `scripts/exp_27_extra_single_prism2_all_train_infer.sh`;
+  - `scripts/exp_28_extra_double_prism2aux_all_train_infer.sh`;
+  - `scripts/run_exp_27_28_prism2_extra.sh`.
+- exp_27 trains `ptv3_main_singledrug_prism2` on `all_train_subset_test` with `PRISM2nd_label_total`, then infers the six mat extra single-drug tasks.
+- exp_28 trains `ptv3_main_doubledrug_prism2aux` on `all_train_subset_test` with synergy labels and PRISM2-filtered single auxiliary rows, then infers `nature`, `nc`, and `guomics` extra double-drug tasks.
+- Ran in tmux session `gpu2` with `flow_v2`:
+  - `TRAINING_READY_ROOT=data/training_ready_prism2_main`;
+  - `EXP_PREFIX=20260625_1940_prism2_exp27_28_nowandb`;
+  - `LOGGER_BACKEND=tensorboard`, `LOG_TO_WANDB=0`.
+- Runtime summary `logs/20260625_1940_prism2_exp27_28_nowandb_runtime_summary.tsv` contains 11 successful rows: 2 train rows, 6 extra single inference rows, 3 extra double inference rows, all status `0`.
+- Result artifacts:
+  - exp_27 metrics: `outputs/2026-06/2026-06-25/20260625_1940_prism2_exp27_28_nowandb_all_single_prism2_for_extra/extra_singledrug_metrics.csv`;
+  - exp_28 metrics: `outputs/2026-06/2026-06-25/20260625_1940_prism2_exp27_28_nowandb_all_single_double_prism2aux_for_extra/extra_doubledrug_test_label_auprc.csv`;
+  - detailed report: `docs/2026-06-25_exp27_28_prism2_extra_results.md`.
+
+## 2026-06-26 18:33 HKT CPA/BioLord Generated-Transcriptome Downstream MLP
+
+- Added a standalone downstream binary classifier for generated transcriptome prediction matrices:
+  - `scripts/train_transcriptome_downstream_mlp.py`;
+  - `scripts/run_transcriptome_downstream_tune_and_full.py`;
+  - `scripts/run_transcriptome_downstream_tune_and_full.sh`;
+  - `scripts/report_transcriptome_downstream_results.py`.
+- The trainer reads CPA/BioLord prediction h5ad `.X` from `/mnt/shared-storage-gpfs2/beam-gpfs02/maoxinjie/AIVC/ptv3_single_nonablation/output/official_fixed_residual_20260605`, uses `PRISM1st_label_total` as `sensitive=1` and `non-responsive=0`, fits transcriptome mean/std on train only, and combines the 9843-dimensional transcriptome vector with a 2048-bit Morgan fingerprint.
+- Morgan fingerprints are loaded from `data/training_ready/ptv3/derived/drug_embedding_morgan_2048.pkl` by `drug_id`; missing ids fall back to RDKit radius-2, 2048-bit fingerprints from `drug_smiles_primary`.
+- The model is a pure BCE binary MLP with separate transcriptome and drug towers plus a concat fusion head; it does not use PTV1/PTV3 ODE, reconstruction MSE, controls, covariates, graph features, dose, or time.
+- The orchestrator runs the planned 4-config screen on folds `0,2,4` for `cpa` and `biolord` across `exp01`-`exp03`, selects each branch/exp winner by mean validation AUPRC with n-AUPRC/AUROC/validation-loss tie-breakers, then runs final folds `0..4`.
+- Output prefix: `outputs/2026-06/2026-06-26/20260626_transcriptome_mlp_official_fixed_residual_v1/`.
+  - Tuning runs use `tune/{branch}/{exp}/{config}/fold{fold}/`;
+  - final runs use `final/{branch}/{exp}/fold{fold}/`;
+  - each run writes `run_config.json`, `epoch_metrics.csv`, `metrics.json`, `best_checkpoint.pt`, and train/val/test prediction CSVs.
+- Verification completed before full launch:
+  - `python -m py_compile` passed for the three Python scripts;
+  - full data smoke checks passed for `cpa` and `biolord` exp01 fold0 train/val/test: `.X=9843`, Morgan dimension `2048`, nonempty positive/negative labels, no NaN/Inf, and all drug ids hit the Morgan pickle;
+  - one-epoch CPU smoke training on `cpa exp01 fold0` with 512 rows per split produced checkpoint, metrics, and all prediction CSVs under `outputs/2026-06/2026-06-26/20260626_transcriptome_mlp_official_fixed_residual_v1/smoke_train/cpa/exp01/fold0/`.
+- Full tune+final run was launched in tmux session `gpu2` with:
+  - `cd /mnt/shared-storage-gpfs2/beam-gpfs02/wuhao/PTV/proteintalk_v2 && source /mnt/shared-storage-user/wuhao/miniconda3/etc/profile.d/conda.sh && conda activate flow_v2 && CUDA_VISIBLE_DEVICES=0 bash scripts/run_transcriptome_downstream_tune_and_full.sh --prefix 20260626_transcriptome_mlp_official_fixed_residual_v1`.
+- Final report targets:
+  - Markdown: `docs/2026-06-26_transcriptome_mlp_exp01_03_results.md`;
+  - JSON: `outputs/2026-06/2026-06-26/20260626_transcriptome_mlp_official_fixed_residual_v1_transcriptome_mlp_report.json`;
+  - CSVs: `outputs/2026-06/2026-06-26/20260626_transcriptome_mlp_official_fixed_residual_v1_transcriptome_mlp_tune_summary.csv`, `outputs/2026-06/2026-06-26/20260626_transcriptome_mlp_official_fixed_residual_v1_transcriptome_mlp_final_summary.csv`, and `outputs/2026-06/2026-06-26/20260626_transcriptome_mlp_official_fixed_residual_v1_transcriptome_mlp_final_folds.csv`.
+
+## 2026-06-29 12:41 HKT CPA/BioLord Transcriptome MLP PTV2-Benchmark-Aligned LR CV
+
+- Extended `scripts/train_transcriptome_downstream_mlp.py` with an explicit fixed-epoch no-validation mode:
+  - `--merge-val-into-train` merges current fold train and val prediction h5ad rows into the training set before scaler fitting;
+  - `--no-validation` disables validation checkpoint selection and early stopping;
+  - `--fixed-epochs` aliases the fixed training epoch count;
+  - final runs save `final_checkpoint.pt`, `metrics.json`, `epoch_metrics.csv`, `predictions_train.csv`, and `predictions_test.csv`.
+- Added the PTV2-benchmark-aligned LR-CV launcher:
+  - `scripts/run_transcriptome_downstream_ptv2benchmark_lr_cv.py`;
+  - `scripts/run_transcriptome_downstream_ptv2benchmark_lr_cv.sh`.
+- Added the matching report generator:
+  - `scripts/report_transcriptome_downstream_ptv2benchmark_lr_cv.py`;
+  - report target `docs/2026-06-29_transcriptome_mlp_ptv2benchmark_lr_cv_results.md`;
+  - output JSON/CSV targets under `outputs/2026-06/2026-06-29/20260629_transcriptome_mlp_ptv2benchmark_lr_cv_v1_*`.
+- Fixed benchmark-aligned settings for this run:
+  - LR grid: `5e-5`, `1e-4`, `2e-4`, `5e-4`, `1e-3`;
+  - `hidden_dim=64`, `drug_hidden_dim=32`, `fusion_hidden_dim=32`, `dropout=0.0`, `activation=relu`;
+  - `batch_size=64`, `optimizer=AdamW`, `weight_decay=0.01`, `fixed_epochs=8000`.
+- This workflow intentionally excludes PTV1/PTV2 benchmark mechanisms that are not mappable to the generated-transcriptome MLP input: ODE dynamics, proteomics reconstruction MSE, SWAG, validation scheduler, early stopping, controls, covariates, graphs, dose, and time.
+- Selection policy changed from the earlier tune/final scheme to full 5-fold CV for every LR. For each branch+exp, best LR is selected by mean5 test AUPRC, and the report explicitly labels this as a test-selected best result rather than an independent holdout estimate.
+- Verification completed:
+  - `python -m py_compile` passed for the trainer, LR-CV launcher, and LR-CV reporter;
+  - data smoke passed for `cpa` and `biolord` exp01 fold0 with merged train rows `14380`, test rows `3606`, transcriptome dimension `9843`, Morgan dimension `2048`, both label classes present, no dropped labels, and no Morgan fallback rows;
+  - one-epoch training smoke passed for `cpa exp01 fold0 lr=1e-4` with `--limit-rows 512`, producing `final_checkpoint.pt`, `metrics.json`, `epoch_metrics.csv`, `predictions_train.csv`, and `predictions_test.csv` under `/tmp/ptv2_lr_cv_train_smoke_cpa_exp01_fold0`.
+- Full run command planned for tmux session `gpu2`:
+  - `cd /mnt/shared-storage-gpfs2/beam-gpfs02/wuhao/PTV/proteintalk_v2 && source /mnt/shared-storage-user/wuhao/miniconda3/etc/profile.d/conda.sh && conda activate flow_v2 && CUDA_VISIBLE_DEVICES=0 bash scripts/run_transcriptome_downstream_ptv2benchmark_lr_cv.sh --prefix 20260629_transcriptome_mlp_ptv2benchmark_lr_cv_v1`.
+
+## 2026-06-29 21:25 HKT Transcriptome MLP LR CV Epoch Reduction
+
+- Stopped the active `gpu2` 8000-epoch LR-CV run by sending `Ctrl-C` to the tmux foreground process.
+- At stop time, the old prefix `20260629_transcriptome_mlp_ptv2benchmark_lr_cv_v1` had completed `7/150` folds and was interrupted during `cpa exp01 lr1e4 fold2`.
+- Updated the PTV2-benchmark LR-CV defaults:
+  - `scripts/run_transcriptome_downstream_ptv2benchmark_lr_cv.py` now defaults to `fixed_epochs=150`;
+  - `scripts/report_transcriptome_downstream_ptv2benchmark_lr_cv.py` now defaults to prefix `20260629_transcriptome_mlp_ptv2benchmark_lr_cv_ep150_v1` and reports `fixed_epochs=150`.
+- Recompiled the trainer, runner, and reporter with `python -m py_compile`.
+- The 150-epoch rerun uses a fresh prefix to avoid mixing old 8000-epoch metrics with new 150-epoch metrics:
+  - `outputs/2026-06/2026-06-29/20260629_transcriptome_mlp_ptv2benchmark_lr_cv_ep150_v1/`.
+
+## 2026-07-08 14:58 HKT exp_04_v2 Random Control-Proteome No-MSE Baseline
+
+- Added `scripts/generate_random_control_proteome.py` to build a saved random control proteome matrix for `ptv3_main_singledrug` from real control-row per-protein `nanmean/nanstd` statistics.
+- The generator samples one random control vector for every feature-table row with seed `42`, clips negative sampled values to `0`, and records shape, control-row count, fallback counts, clipping count, and statistics policy in `random_control_expression_seed42.meta.json`.
+- Extended `dataset/training_ready_fast_dataset.py`, `train.py`, and `infer.py` with `control_expression_mode={real,random_saved}` plus `--random-control-expression-path`; `random_saved` uses `random_control_expression_matrix[perturb_row]` for the batch control expression.
+- Fast train and infer manifests now record `control_expression_mode`, the resolved random artifact path, and a compact random-artifact summary; inference checkpoint config validation compares these fields.
+- Added `scripts/exp_04_v2_single_no_mse_random_baseline_5fold.sh`, which mirrors the single-drug no-MSE fold loop while defaulting to the saved seed-42 random control artifact.
+- Updated `scripts/ptv3_experiment_common.sh` and `scripts/README_ptv3_experiments.md` so the random-control mode can be launched through the standard PTV3 experiment interface.
+- Generated and validated the seed-42 artifact at `data/training_ready/ptv3/tasks/ptv3_main_singledrug/random_control_expression_seed42.npy`; shape matches `feature_expression_matrix.npy`, the meta seed is `42`, sampled values are non-negative, and sampled control statistics match the target control statistics on a column sample.
+- Verification passed for `python -m py_compile train.py infer.py dataset/training_ready_fast_dataset.py scripts/generate_random_control_proteome.py` and `bash -n` on the common and exp_04_v2 launchers.
+- GPU smoke `20260708_exp04_v2_smoke` completed on tmux `gpu2` fold0 with `fit_completed/test_completed`, `have_mse_loss=false`, and `control_expression_mode=random_saved`.
+- Full run `20260708_exp04_v2` completed on tmux `gpu2` for folds `0 1 2 3 4`; all five formal manifests have `fit_completed/test_completed`, `have_mse_loss=false`, and `control_expression_mode=random_saved`.
+- Formal mean5 results: AUROC `0.905289`, AUPRC `0.673665`, aggregate baseline `0.119242`, nAUPRC `5.717265`, ACC `0.913943`, total count `17779`, positives `2120`, negatives `15659`, best epochs `1,1,2,3,10`.
+- Added the stable results report `docs/2026-07-08_exp04_v2_random_control_baseline_results.md`.
+
+## 2026-07-08 15:44 HKT exp01/exp03 Fold0 Feature Attribution Setup
+
+- Added optional `DRUG_EMBEDDING_PATH` passthrough in `scripts/ptv3_experiment_common.sh` for train/infer config parity; unset behavior remains the default Morgan artifact.
+- Added `scripts/build_feature_attribution_zero_artifacts.py` and generated:
+  - `data/training_ready/ptv3/tasks/ptv3_main_singledrug/zero_control_expression.npy`, shape `(18359, 10982)`, float32, all zero;
+  - `data/training_ready/ptv3/derived/drug_embedding_morgan_2048_zero.pkl`, shape `(6131, 2048)`, float32, all zero;
+  - summary JSON `outputs/2026-07/2026-07-08/20260708_feature_attr_zero_artifacts_summary.json`.
+- Added `scripts/run_exp01_exp03_fold0_feature_attribution.sh`, which sequentially runs exp01 fold0 then exp03 fold0 for `full_mse`, `full_nomse`, leave-one-out ablations, and only-feature variants. The runner forces `GPU_IDS=0`, `DEVICES=1`, `LOGGER_BACKEND=none`, `LOG_TO_WANDB=0`, `WANDB_MODE=disabled`, and `FOLDS=0`.
+- Zero-Morgan variants use a separate graph cache directory `graph_cache/20260708_feature_attr_zero_morgan` so graph features cannot reuse a cache built from the real Morgan embedding.
+- Added `scripts/report_feature_attribution_fold0.py`, targeting `docs/2026-07-08_feature_attribution_exp01_exp03_fold0_results.md` and `outputs/2026-07/2026-07-08/20260708_feature_attr_fold0_summary.json` after all manifests complete.
+- Verification passed:
+  - `python -m py_compile train.py scripts/build_feature_attribution_zero_artifacts.py scripts/report_feature_attribution_fold0.py`;
+  - `bash -n scripts/ptv3_experiment_common.sh`;
+  - `bash -n scripts/run_exp01_exp03_fold0_feature_attribution.sh`;
+  - reporter smoke to `/tmp` with `--allow-incomplete`;
+  - confirmed seed42 random control, zero-control, zero-Morgan artifacts, and tmux session `gpu2`.
+- Launched the full fold0 attribution matrix in tmux `gpu2` with prefix `20260708_feature_attr`:
+  - `cd /mnt/shared-storage-gpfs2/beam-gpfs02/wuhao/PTV/proteintalk_v2 && source /mnt/shared-storage-user/wuhao/miniconda3/etc/profile.d/conda.sh && conda activate flow_v2 && EXP_PREFIX=20260708_feature_attr bash scripts/run_exp01_exp03_fold0_feature_attribution.sh`.
+- Full matrix completed successfully: all 28 expected manifests are present with `run_status=fit_completed` and `test_status=test_completed`; reporter validation errors: `0`.
+- Generated final reports:
+  - `docs/2026-07-08_feature_attribution_exp01_exp03_fold0_results.md`;
+  - `outputs/2026-07/2026-07-08/20260708_feature_attr_fold0_summary.json`.
+- Fold0 attribution summary:
+  - exp01 unseen-drug: largest leave-one-out AUPRC drop is graph (`graph_zero`, drop `0.105132`); strongest only-feature AUPRC is graph (`graph_only`, `0.644649`).
+  - exp03 unseen-cell: largest leave-one-out AUPRC drop is graph (`graph_zero`, drop `0.075744`); strongest only-feature AUPRC is Morgan (`morgan_only`, `0.740411`).
+
+## 2026-07-08 20:57 HKT exp_04_v2 Max-Drop Random Expression
+
+- Extended `scripts/generate_random_control_proteome.py` with random-expression policies: `per_protein_normal_clip`, `global_normal_clip`, `global_value_bootstrap`, `fixed_gene_permutation`, `per_row_gene_permutation`, `cross_cell_real_control`, and diagnostic `zero_control`.
+- Generated and header/meta-validated all policy artifacts under `data/training_ready/ptv3/tasks/ptv3_main_singledrug/`; each matches `feature_expression_matrix.npy` shape `(18359, 10982)`, dtype `float32`, and has non-negative values.
+- Added the fold0 GPU screen runner `scripts/run_exp04_v2_random_expression_screen_fold0.sh`, which runs one real-control no-MSE reference plus random-expression policies on `gpu2` with PCEP on, graph/target/covariates default, and no MSE loss.
+- Added reports:
+  - screen reporter `scripts/report_exp04_v2_random_expression_screen.py`;
+  - final 5-fold reporter `scripts/report_exp04_v2_maxdrop_random_expression.py`;
+  - screen report `docs/2026-07-08_exp04_v2_random_expression_maxdrop_screen.md`;
+  - final report `docs/2026-07-08_exp04_v2_maxdrop_random_expression_results.md`;
+  - JSON summaries under `outputs/2026-07/2026-07-08/20260708_exp04_v2_random_expression_screen_summary.json` and `outputs/2026-07/2026-07-08/20260708_exp04_v2_maxdrop_random_expression_summary.json`.
+- Screen result: `per_row_gene_permutation` was selected as the max-drop random expression artifact, with fold0 AUPRC `0.654977` versus real-control no-MSE fold0 AUPRC `0.702725` (drop `0.047748`). The zero-control diagnostic did not collapse the model (`0.716967` AUPRC).
+- Updated `scripts/exp_04_v2_single_no_mse_random_baseline_5fold.sh` so its default `RANDOM_CONTROL_EXPRESSION_PATH` is `data/training_ready/ptv3/tasks/ptv3_main_singledrug/random_control_expression_per_row_gene_permutation_seed42.npy`; environment override is preserved.
+- An initial final run with prefix `20260708_exp04_v2_maxdrop_random_expr` was interrupted because it inherited `RUN_PREFLIGHT=1`; it is not used for results. The formal final run used clean prefix `20260708_exp04_v2_maxdrop_random_expr_clean` with `RUN_PREFLIGHT=0`, `RUN_DATA_VALIDATION=0`, `RUN_INFERENCE=0`, and `PROGRESS_BAR=0`.
+- Formal clean 5-fold result: max-drop random mean AUPRC `0.592230`, mean AUROC `0.891713`, mean nAUPRC `5.036277`; current seed42 random mean AUPRC `0.673665`, mean AUROC `0.905289`, mean nAUPRC `5.717265`; mean AUPRC drop versus current seed42 random is `0.081436`.
+- Verification passed:
+  - `python -m py_compile train.py scripts/generate_random_control_proteome.py scripts/report_exp04_v2_random_expression_screen.py scripts/report_exp04_v2_maxdrop_random_expression.py`;
+  - `bash -n scripts/ptv3_experiment_common.sh scripts/run_exp04_v2_random_expression_screen_fold0.sh scripts/exp_04_v2_single_no_mse_random_baseline_5fold.sh`;
+  - screen reporter validation errors: `0`;
+  - final reporter validation errors: `0`;
+  - all formal clean final manifests have `run_status=fit_completed` and `test_status=test_completed`.
+
+## 2026-07-09 11:38 HKT exp_04_v2 Max-Drop Random Expression Detailed Analysis
+
+- Added the expanded interpretation report `docs/2026-07-09_exp04_v2_maxdrop_random_expression_detailed_analysis.md`.
+- The new report explains:
+  - why the original per-protein seed42 random expression did not degrade fold0;
+  - why zero control is not an adversarial perturbation in the no-MSE setting;
+  - why `fixed_gene_permutation` can be learned around while `per_row_gene_permutation` is harmful;
+  - why the final result should be described as a max-drop/adversarial random-expression stress test rather than a neutral random baseline;
+  - how the result relates to the fold0 feature-attribution matrix, where graph features remain a stronger exp01 leave-one-out driver than PCEP/control expression.
+- No training code or experiment setting was changed in this documentation-only update.
+
+## 2026-07-09 12:07 HKT exp_04_v2 Global Mean/Std Random Expression 5-Fold
+
+- Ran the requested unseen-drug 5-fold experiment using the global mean/std random control-expression artifact:
+  - prefix `20260709_exp04_v2_global_meanstd_random_expr`;
+  - artifact `data/training_ready/ptv3/tasks/ptv3_main_singledrug/random_control_expression_global_normal_clip_seed42.npy`;
+  - task `ptv3_main_singledrug`, head `response`, splits `pert_stratified_5fold_fold0..4`;
+  - no MSE loss, `CONTROL_EXPRESSION_MODE=random_saved`, PCEP on, graph/target/covariates at default settings.
+- CPU-side checks confirmed:
+  - artifact policy `global_normal_clip`;
+  - global control mean `14.529332`, global control std `1.553119`;
+  - artifact and `feature_expression_matrix.npy` headers both report shape `(18359, 10982)`, dtype `float32`;
+  - `bash -n scripts/ptv3_experiment_common.sh scripts/exp_04_v2_single_no_mse_random_baseline_5fold.sh` passed;
+  - `python -m py_compile train.py infer.py scripts/generate_random_control_proteome.py scripts/report_exp04_v2_global_meanstd_random_expression.py` passed.
+- GPU work was launched only through tmux session `gpu2`:
+  - `EXP_PREFIX=20260709_exp04_v2_global_meanstd_random_expr RANDOM_CONTROL_EXPRESSION_PATH=data/training_ready/ptv3/tasks/ptv3_main_singledrug/random_control_expression_global_normal_clip_seed42.npy CONTROL_EXPRESSION_MODE=random_saved GPU_IDS=0 DEVICES=1 LOGGER_BACKEND=none LOG_TO_WANDB=0 WANDB_MODE=disabled FOLDS="0 1 2 3 4" RUN_PREFLIGHT=1 RUN_DATA_VALIDATION=0 PROGRESS_BAR=0 bash scripts/exp_04_v2_single_no_mse_random_baseline_5fold.sh`.
+- Added `scripts/report_exp04_v2_global_meanstd_random_expression.py` to validate and summarize the global mean/std random-expression 5-fold run against the current seed42 random baseline and the previous max-drop random result.
+- Runtime summary `logs/20260709_exp04_v2_global_meanstd_random_expr_runtime_summary.tsv` shows all five fold train/test jobs completed with status `0`.
+- Reporter validation errors: `0`; every global mean/std manifest has `run_status=fit_completed`, `test_status=test_completed`, `have_mse_loss=false`, `control_expression_mode=random_saved`, and the expected global-normal artifact path.
+- Final report artifacts:
+  - `docs/2026-07-09_exp04_v2_global_meanstd_random_expression_results.md`;
+  - `outputs/2026-07/2026-07-09/20260709_exp04_v2_global_meanstd_random_expression_summary.json`.
+- 5-fold global mean/std random result: mean AUPRC `0.581342`, std AUPRC `0.114177`, mean nAUPRC `4.951581`, mean AUROC `0.886019`, mean ACC `0.903646`.
+- Compared with current seed42 random baseline (`0.673665` mean AUPRC), global mean/std random is lower by `0.092323` mean AUPRC.
+- Compared with previous max-drop row-wise permutation (`0.592230` mean AUPRC), global mean/std random is lower by `0.010887` mean AUPRC in this completed 5-fold run, despite being slightly less harmful than row-wise permutation on the original fold0 screen.
+
+## 2026-07-09 12:10 HKT exp_04_v2 Default Setting Update
+
+- Updated `scripts/exp_04_v2_single_no_mse_random_baseline_5fold.sh` so the exp_04_v2 runner now defaults to the completed global mean/std random-expression setting:
+  - `EXPERIMENT_SET_NAME=exp_04_v2_single_no_mse_global_meanstd_random_expression_5fold`;
+  - `CONTROL_EXPRESSION_MODE=random_saved`;
+  - `RANDOM_CONTROL_EXPRESSION_PATH=data/training_ready/ptv3/tasks/ptv3_main_singledrug/random_control_expression_global_normal_clip_seed42.npy`;
+  - no-MSE training on `ptv3_main_singledrug` `pert_stratified_5fold_fold*` remains unchanged.
+- Preserved `RANDOM_CONTROL_EXPRESSION_PATH` and `CONTROL_EXPRESSION_MODE` environment overrides for explicit reruns of older/random variants.
+- Updated `scripts/README_ptv3_experiments.md` so the documented generation command uses `--policy global_normal_clip` and the documented default artifact path matches the script.
+- Verification passed:
+  - `bash -n scripts/ptv3_experiment_common.sh scripts/exp_04_v2_single_no_mse_random_baseline_5fold.sh`;
+  - confirmed the default global-normal artifact and `.meta.json` exist.
+
+## 2026-07-09 16:09 HKT exp31 RNA-seq PDX Fine-tune Benchmark Tooling
+
+- Added copy-on-write exp31 builders for `data/rawdata/rna_seq` without modifying `data/training_ready`:
+  - `utils/31_build_exp31_rnaseq_training_ready.py`;
+  - `utils/31_build_exp31_cell_llm_embeddings.py`.
+- Built the exp31 training-ready root at `data/training_ready_exp31_rnaseq/ptv3`:
+  - four tasks: `sensitive_early`, `sensitive_late`, `disease_control_early`, `disease_control_late`;
+  - split strategy `brca_ft_valid_nonbrca_test` with BRCA train/valid and non-BRCA held-out test;
+  - dropped the two rows with missing `cancer_type`;
+  - preserved the exp09 checkpoint protein axis with 11,092 proteins; RNA covered 10,159 of them;
+  - added 5 new SMILES-only drug ids in the exp31 copy only.
+- Extended graph/drug artifacts only in the exp31 copy:
+  - Morgan drug embedding shape `(6136, 2048)`;
+  - DDI matrix shape `(6136, 6136)` with source block copied unchanged and new rows/columns computed by Morgan/Tanimoto;
+  - PDI matrix shape `(6136, 11345)` with all-zero rows for the 5 SMILES-only drugs;
+  - PPI/protein embedding copied unchanged.
+- Added GPU runner `scripts/exp_31_rnaseq_pdx_ft_benchmark.sh`:
+  - initializes from `checkpoints/20260615_1101_exp09_selectedref_v1_unified_all_single_double_for_extra/last.ckpt`;
+  - trains the four labels separately with `--no-mse-loss`, unified head, `CELL_LLM_MODE=frozen`, `USE_DDI=1`, exp09-compatible dual pair fusion, and best checkpoint by BRCA valid AUPRC;
+  - runs both fine-tuned test inference and exp09 zero-shot baseline inference on the same non-BRCA split.
+- Added reporter `scripts/report_exp31_rnaseq_pdx_ft_benchmark.py`:
+  - `--preflight-only` validates data artifacts, split/class coverage, and zero PDI rows for SMILES-only drugs;
+  - full mode summarizes fine-tuned versus zero-shot metrics overall, by cancer type, and by treatment type, then selects the label by BRCA valid AUPRC.
+- External OpenAI-compatible API generation for exp31 sample-level Cell embeddings was not run because the sandbox reviewer rejected exporting exp31 prompts to the raw-IP `.env` endpoint. Instead, generated the exp31 Cell-channel artifact with an explicit offline fallback:
+  - output `data/training_ready_exp31_rnaseq/ptv3/derived/cell_llm_embedding_exp31_rnaseq_qwen3_4096.npz`;
+  - shape `(178, 4096)`;
+  - mapping `BRCA->BREAST`, `CRC->COLON`, `PDAC->PANCREAS`, `NSCLC->LUNG`, `CM->SKIN` from the existing validated tissue-level `cell_type_llm_embedding_qwen3_4096_v2.npz`;
+  - metadata records `generation_mode=offline_tissue_fallback_from_existing_cell_type_llm`.
+- CPU verification passed:
+  - `python -m py_compile utils/31_build_exp31_rnaseq_training_ready.py utils/31_build_exp31_cell_llm_embeddings.py scripts/report_exp31_rnaseq_pdx_ft_benchmark.py train.py infer.py`;
+  - `bash -n scripts/exp_31_rnaseq_pdx_ft_benchmark.sh scripts/ptv3_experiment_common.sh`;
+  - `python scripts/report_exp31_rnaseq_pdx_ft_benchmark.py --preflight-only --output-json outputs/2026-07/2026-07-09/20260709_exp31_preflight.json`.
+- Launched GPU work only through tmux session `gpu2`:
+  - `EXP_PREFIX=20260709_exp31_rnaseq GPU_IDS=0 DEVICES=1 LOGGER_BACKEND=none LOG_TO_WANDB=0 WANDB_MODE=disabled RUN_PREFLIGHT=1 RUN_DATA_VALIDATION=0 PROGRESS_BAR=0 RUN_REPORT=0 bash scripts/exp_31_rnaseq_pdx_ft_benchmark.sh`.
+- GPU runtime summary `logs/20260709_exp31_rnaseq_runtime_summary.tsv` shows all 12 stages completed with status `0`: 4 fine-tunes, 4 fine-tuned non-BRCA inferences, and 4 exp09 zero-shot non-BRCA inferences.
+- Final report artifacts:
+  - `docs/2026-07-09_exp31_rnaseq_pdx_ft_benchmark_results.md`;
+  - `outputs/2026-07/2026-07-09/20260709_exp31_rnaseq_pdx_ft_benchmark_summary.csv`;
+  - `outputs/2026-07/2026-07-09/20260709_exp31_rnaseq_pdx_ft_benchmark_summary.json`.
+- Reporter validation errors: `0`.
+- Selection by BRCA valid AUPRC chose `sensitive_early`: valid AUPRC `0.853725`; non-BRCA fine-tuned AUPRC `0.180543`, AUROC `0.617007`; exp09 zero-shot AUPRC `0.147293`, AUROC `0.629695`.
+- Other non-BRCA fine-tuned overall results:
+  - `sensitive_late`: AUPRC `0.141063`, AUROC `0.651117`;
+  - `disease_control_early`: AUPRC `0.607784`, AUROC `0.660188`;
+  - `disease_control_late`: AUPRC `0.254908`, AUROC `0.673322`.
+
+## 2026-07-10 15:05 HKT Exp32 Organoid Exp09 Single-drug Sensitivity Inference
+
+- Added `utils/32_build_exp32_organoid_training_ready.py` and built the isolated copy-on-write root `data/training_ready_exp32_organoid/ptv3`.
+  - Parsed the two CellType-augmented sample-by-protein matrices without changing the raw files; treated the misnamed `prot_gene` column as sample ID.
+  - Joined `pat_ID` by the exact `PTV2_1`-`PTV2_13` numeric suffix and rejected tissue disagreement.
+  - Aligned to the exact exp09 11,092-protein axis, applied `log1p` only to finite non-negative values, and retained missing proteins/values as `NaN`.
+  - Extracted the exact 3,217-drug union from the 11 exp01-exp09 main+extra task tables and validated pert-index, Morgan, graph-feature, SMILES, and target coverage.
+  - Built QE and 480_FAIMS tasks with 13 real controls, 41,821 unlabeled single-drug queries, and 13 test-only control/query sets each.
+  - Streamed each `(41834, 11092)` float32 `.npy` without GPFS mmap and hard-linked its processed copy; total exp32 root size is about 3.7 GB.
+  - Reused the original PTV3 global meta and derived artifacts through read-only symlinks; no drug, protein, graph, categorical, or LLM index was extended.
+- Added `scripts/exp_32_organoid_exp09_single_sensitivity_infer.sh` with the fixed exp09 epoch-5 architecture, frozen Cell and cell-type LLMs, real graph/PCEP/target/DDI features, all batch+dose covariates, overwrite protection, and smoke support.
+- Extended `infer.py` fast-checkpoint validation to persist a complete 103-field inference config comparison, normalized legacy defaults, exact mismatch records, and architecture/path match flags. The exp32 formal runs have zero mismatches.
+- Added `scripts/report_exp32_organoid_exp09_single_sensitivity.py` with streamed matrix/hash/data preflight, smoke validation, final output enrichment, per-sample/device distributions, top-20 rankings, paired device correlations, top-50/top-100 overlap, probability shift, and largest drug-difference analysis.
+- Verification passed:
+  - `python -m py_compile utils/32_build_exp32_organoid_training_ready.py scripts/report_exp32_organoid_exp09_single_sensitivity.py infer.py`;
+  - `bash -n scripts/exp_32_organoid_exp09_single_sensitivity_infer.sh`;
+  - reporter preflight: 2 tasks, 3,217 drugs, exact 11,092-protein axis, 31 valid hash records;
+  - two-task GPU smoke: 256 rows/task, finite bounded probabilities, metadata/config agreement;
+  - two-task formal GPU inference: 41,821 rows/task, status 0, 21 seconds/task;
+  - final reporter: 83,642 rows, 41,821 exact B/CAC pairs, no validation errors.
+- Final artifacts:
+  - `outputs/2026-07/2026-07-10/20260710_exp32_organoid_exp09_single_sensitivity_predictions.csv` and `.parquet`;
+  - `outputs/2026-07/2026-07-10/20260710_exp32_organoid_exp09_single_sensitivity_summary.json`;
+  - `outputs/2026-07/2026-07-10/20260710_exp32_organoid_exp09_single_sensitivity_top20_by_sample.csv`;
+  - `docs/2026-07-10_exp32_organoid_exp09_single_sensitivity_results.md`.
+- This is unlabeled inference only. The report intentionally contains no AUROC or AUPRC.
+
+## 2026-07-19 04:42 HKT Exp09 patientVali All-Epoch Staged Inference Interface
+
+- Extended `utils/17_infer_patient_validation_exp09_all_epoch_ckpts.py` with a mutually exclusive `--infer-only` mode alongside the existing `--skip-infer` mode.
+- `--infer-only` now runs only the checkpoint/task `infer.py` jobs and returns without reading prediction tables, creating the readable output directory, or writing combined/summary artifacts. Existing per-task predictions remain resumable because the existing no-`--force` skip behavior is preserved.
+- `--skip-infer` remains the CPU aggregation entry point and rebuilds the raw combined outputs plus all readable exports from already generated per-task prediction files.
+- This staged interface supports the selectedref exp09 patientVali260605v3 rerun with GPU inference isolated in tmux `gpu2` and CPU-side aggregation/validation performed separately.
+
+## 2026-07-20 20:50 HKT Exp31/Exp32 Epoch-2 Rerun Tooling
+
+- Updated `scripts/exp_32_organoid_exp09_single_sensitivity_infer.sh` so `EXP32_CHECKPOINT` can be overridden by the launch environment while retaining the historical epoch-5 checkpoint as the default.
+- Updated `scripts/exp_31_rnaseq_pdx_ft_benchmark.sh` so reporter compilation obeys `RUN_PREFLIGHT`; `RUN_PREFLIGHT=0` GPU launches no longer run that CPU-side check.
+- Extended `scripts/report_exp31_rnaseq_pdx_ft_benchmark.py` with `--init-checkpoint` and exact path validation for all fine-tune `args.checkpoint_path` values and all zero-shot inference `checkpoint_path` values. The selected init checkpoint is now recorded in preflight/full JSON and rendered explicitly in Markdown; the existing 16-column CSV schema and report sections are unchanged.
+- Generalized `scripts/report_exp32_organoid_exp09_single_sensitivity.py` to validate the explicitly selected checkpoint from the same exp09 run used by the immutable exp32 data build. Inference manifests must match that exact selected checkpoint; the build summary remains validated against its recorded epoch-5 provenance without rebuilding or modifying exp32 data.
+- The epoch-2 rerun uses `checkpoints/20260615_1101_exp09_selectedref_v1_unified_all_single_double_for_extra/epoch=2.ckpt`, SHA-256 `7a0786467279c079478a34dcd323cb61aaf6b2bbf68fc8a0be9d959d578cb076`, and new `20260720_*_epoch2` prefixes.
+- Initial verification passed: shell syntax for both runners/common helper, Python compilation for both reporters, reporter argument-help checks, and targeted `git diff --check`. Formal CPU preflight, H200 smoke/full execution, reports, and acceptance results are recorded separately after completion.
+
+## 2026-07-20 21:05 HKT Exp31/Exp32 Epoch-2 Rerun Completion
+
+- CPU preflight passed for Exp31 and Exp32 with the selected epoch-2 checkpoint; Exp31 preflight JSON has `errors=[]`, while Exp32 validated two tasks, 3,217 drugs, 11,092 proteins, and 31 provenance hashes.
+- H200 smoke passed on `gpu2:0`:
+  - Exp31: four one-batch fine-tunes plus eight 256-row inference outputs; all 12 runtime statuses are `0` and every fine-tune/zero-shot manifest uses epoch 2 as required.
+  - Exp32: two 256-row outputs; reporter smoke validation passed for both tasks.
+- Formal Exp31 prefix `20260720_exp31_rnaseq_epoch2` completed all four 30-epoch fine-tunes and eight inferences. The runtime TSV has exactly 4 train and 8 infer rows, all status `0`; each inference has 1,827 finite bounded probabilities. Reporter output has `errors=[]`, 56 rows and the unchanged 16-column schema. Selection by BRCA valid AUPRC chose `disease_control_early` (`0.850399`); its fine-tuned non-BRCA AUPRC is `0.624594` versus epoch-2 zero-shot `0.565795`.
+- Formal Exp32 prefix `20260720_exp32_organoid_exp09_epoch2_single_sensitivity` completed both tasks with status `0`. Each raw output has 41,821 rows; combined CSV/Parquet have 83,642 rows and 18 columns, covering two devices, 13 samples, and 3,217 drugs. Probabilities are finite and bounded, the top-20 table has 520 rows, both inference manifests report exact epoch 2 and zero config mismatches, and summary status is `complete`.
+- Final outputs:
+  - `outputs/2026-07/2026-07-20/20260720_exp31_rnaseq_epoch2_pdx_ft_benchmark_summary.{csv,json}` and `docs/2026-07-20_exp31_rnaseq_epoch2_pdx_ft_benchmark_results.md`;
+  - `outputs/2026-07/2026-07-20/20260720_exp32_organoid_exp09_epoch2_single_sensitivity_predictions.{csv,parquet}`, top-20 CSV, summary JSON, and `docs/2026-07-20_exp32_organoid_exp09_epoch2_single_sensitivity_results.md`.
+- CSV schemas and Markdown section sequences match the historical 2026-07-09/10 reports. Historical artifacts retain their original paths and modification times; no existing run directory was reused.
+
+## 2026-07-21 11:32 HKT Outputs Month/Day Organization
+
+- Reorganized the complete `outputs/` tree into `outputs/YYYY-MM/YYYY-MM-DD/<original-top-level-name>` without deleting or splitting any experiment directory.
+- Pre-migration inventory contained 1,978 top-level entries, 17,436 files, 6,719 directories below the root, 0 symlinks, and 4,966,028,641 file bytes.
+- Date routing covered 31 dates from 2026-05-10 through 2026-07-20:
+  - 1,956 entries used a leading `YYYYMMDD` prefix;
+  - 5 legacy patient-validation entries used a leading `MMDD` prefix with year 2026;
+  - 12 entries used an embedded `YYYYMMDD` token;
+  - 5 debug entries used their HKT modification date.
+- Added `scripts/organize_outputs_by_date.py` with dry-run planning, collision validation, same-filesystem rename, failure rollback, inode validation, and JSON path-map generation.
+- Added `scripts/rewrite_output_paths_from_manifest.py` to rewrite exact moved paths and generic dated output references in repository code/review/docs text, with dry-run and per-file SHA-256 audit records.
+- Migration validation confirmed all 1,978 old top-level paths are absent, all 1,978 mapped targets exist, and every mapped top-level inode is unchanged. The month buckets contain all original 17,436 files and no symlinks.
+- Updated 269 exact output references across 65 repository text files, followed by 9 generic dated/wildcard references across 6 files. A final rewrite dry-run reports zero remaining replacements, and no explicit legacy `outputs/YYYYMMDD...`, `outputs/MMDD...`, debug, smoke, audit, or diagnostic path remains outside historical run-manifest provenance.
+- Updated `scripts/ptv3_experiment_common.sh` so future runs default to `outputs/YYYY-MM/YYYY-MM-DD`, deriving the date from the leading `YYYYMMDD` in `EXP_PREFIX` or the current date. `OUTPUT_DATE` and `OUTPUT_DIR` remain explicit overrides.
+- Updated the Exp31/Exp32 runners and reporters so their dynamic output roots follow the dated layout. Existing explicit artifact defaults were mechanically rewritten to their new locations.
+- Added `outputs/README.md`. Audit artifacts are stored in:
+  - `outputs/_organization/2026-07-21_output_path_map.json`;
+  - `outputs/_organization/2026-07-21_reference_rewrite.json`;
+  - `outputs/_organization/2026-07-21_generic_dated_reference_rewrite.json`.
+- Historical run manifests and generated summaries inside moved experiment directories retain their original execution-time paths as immutable provenance. The path-map JSON provides a complete reversible old-to-new mapping.
+
+## 2026-07-22 20:40 HKT Exp32 Drug-ID Raw-SMILES Provenance Clarification
+
+- Added `scripts/build_exp32_drug_id_rawdata_mapping.py` to distinguish the raw legacy lower-case `smiles`/`smiles1`/`smiles2` fields from the canonical SMILES actually used by Exp32.
+- The corrected mapping publishes `raw_legacy_smiles`, `raw_Smiles_no_chiral`, `raw_Smiles_with_chiral`, and `exp32_model_smiles` as separate fields, plus the exact matching raw field and per-ID raw source files/tasks.
+- Added an 11-row source inventory containing every contributing raw CSV, its row count, and its exact ID/name/legacy/no-chiral/with-chiral source columns.
+- Validation confirmed all 3,217 IDs exactly match the prediction and Exp32 scope ID sets. All 3,217 `exp32_model_smiles` values exactly equal the selected raw `Smiles_with_chiral` value; the legacy lower-case field is retained only as raw provenance and is not described as a normalized chiral or non-chiral field.
+
+## 2026-07-22 21:38 HKT Exp32 and Mat1-4 Drug Mapping Audit
+
+- Added `scripts/audit_exp32_mat_drug_mapping.py` to reconstruct the exact raw row/column origin of all 3,217 Exp32 model SMILES and independently replay every mat1-4 extra-single mapping against the update-0623 main-single drug registry.
+- The Exp32 origin audit records the exact raw CSV, row/physical line, ID/name, legacy/no-chiral/with-chiral variants, selected field, source task, and global-meta equality. All 3,217 entries trace exactly to raw with-chirality fields across the 11 source task families.
+- The mat audit covers 8,936 `(mat, raw_drug_id)` rows and 4,506 unique raw IDs. It records mapping evidence, primary-name versus synonym hits, exact code replay, cross-device/mat consistency, model canonical SMILES, standardized structural comparisons, and Morgan Tanimoto.
+- Validation found zero mapping-replay mismatches, zero within-mat conflicts, and zero cross-mat/device inconsistencies. Of 4,506 raw IDs, 1,686 map to 1,573 main IDs and 2,820 retain external IDs.
+- Added deduplicated manual-review and high-risk exports. There are 321 review and 12 high-risk unique raw IDs; the high-risk set isolates name-based major structure conflicts, including a clear `BTS` synonym collision with main `Pyruvic acid`.
+- Full conclusions, limitations, artifact paths, and raw-source provenance are recorded in `data/review_summary/2026-07-22_2138_exp32_mat1_4_drug_mapping_audit_review.md`.
+
+## 2026-07-27 13:40 HKT Exp33 Double-drug Virtual-screen Implementation
+
+- Extended `dataset/training_ready_fast_dataset.py` with an optional,
+  backward-compatible `expression_row_index` indirection. Legacy artifacts
+  without the column retain identity-row behavior; missing, nonnumeric,
+  nonfinite, noninteger, negative, and out-of-bounds indices fail fast.
+- Added regression coverage in
+  `tests/test_training_ready_fast_expression_row_index.py` for legacy identity
+  access, compact control/NaN-sentinel access, and invalid-index rejection.
+- Added `utils/33_build_exp33_vc_doubledrug_training_ready.py` to build three
+  isolated `test_only` tasks under
+  `data/training_ready_exp33_vc_doubledrug/ptv3`. The builder enforces the fixed
+  checkpoint hash, canonical isomeric-SMILES-only drug resolution, baseline
+  provenance, compact expression storage, explicit seen/unseen covariate
+  policies, raw-file hash stability, and atomic publication.
+- Added `scripts/exp_33_vc_doubledrug_epoch2_infer.sh` with fixed epoch-2
+  architecture settings, `cuda:0`, batch size 256, explicit Cell and cell-type
+  LLM index columns, no expression-prediction output, sequential
+  colon/lung/pancreas execution, overwrite protection, and fail-fast runtime
+  recording.
+- Added `scripts/report_exp33_vc_doubledrug_epoch2.py` to validate smoke/formal
+  manifests, expose only `pred_unified_combo_prob` from `pred_task_prob`, map
+  unique-key scores back to original raw-row order, and emit complete
+  CSV/Parquet, audits, runtime copies, JSON, and Markdown without ranking or
+  AUROC/AUPRC.
+- During formal CPU reporting, a string-versus-integer `pert_time` merge mismatch
+  was found before any full prediction file was published. The reporter now
+  normalizes every model-key field explicitly on both merge sides; the
+  regression is covered by
+  `tests/test_report_exp33_model_key_normalization.py`.
+- Build, full preflight, three-tissue one-batch H200 smoke, formal inference, and
+  full CPU reporting passed. Final counts are 1,124,928 unique predictions and
+  2,526,720 raw-order predictions. Detailed execution evidence is recorded in
+  `docs/training_history.md` and
+  `data/review_summary/2026-07-27_1340_exp33_vc_doubledrug_epoch2_implementation_execution_review.md`.
+- Added `scripts/plot_exp33_vc_doubledrug_score_distribution.py` to validate and
+  visualize the formal score distribution. It compares full raw-row weighting
+  with unique model keys, plots tissue-specific ECDFs, and writes a reproducible
+  summary CSV alongside PNG/PDF figures.
+
+## 2026-08-19 14:22 HKT Exp34 Update-0819 OOD Single-drug Inference
+
+- Added `utils/34_build_update0819_ood_training_ready.py` for the 14-row
+  `260513ptv_drug_cell_predict.csv` screen. It preserves both query drugs as new
+  OOD IDs, appends radius-2/2048 Morgan and DDI rows, appends all-zero PDI rows,
+  and builds two target-only sensitivity tasks at fixed 24 h / 10 uM.
+- Historical-similarity target transfer is gated at Morgan Tanimoto `0.5` and
+  can modify only `target_protein_list`. Daraxonrasib and zoldonrasib have
+  maximum similarities `0.225989` and `0.204678`, so neither inherited a
+  historical target. The mechanism branch uses KRAS/NRAS/HRAS and KRAS,
+  respectively; PDI remains zero in both branches.
+- The builder reconstructs the original graph-feature standardization exactly,
+  verifies maximum absolute regeneration error `0.0`, copies the original
+  6,131 graph rows unchanged, and standardizes only the two appended rows with
+  the source mean/std.
+- Added `scripts/exp_34_update0819_ood_epoch2_infer.sh` with the fixed epoch-2
+  architecture, explicit `gpu1_deep:0` execution marker, runtime copy-on-write
+  feature generation under the GPU worker `/tmp`, overwrite protection, and
+  expression-prediction output.
+- Added `scripts/report_exp34_update0819_ood_epoch2.py` to validate the exact
+  checkpoint hash, architecture, four expected extended-artifact path
+  mismatches, probability/expression shapes, single-drug slot contract, and
+  target-only branch isolation. It exports raw predictions, branch comparisons,
+  expression summaries, source audits, axes, JSON, and Markdown.
+- Added `tests/test_exp34_update0819_ood.py`; the Exp34 and fast-dataset suite
+  passed with `9 passed, 4 subtests passed`.
+- H200 smoke and formal inference completed in `gpu1_deep:0`. Formal output has
+  28 predictions (14 pairs x 2 target scenarios), two `14 x 11092` expression
+  matrices, and two successful six-second runtime records. Detailed provenance
+  is in `data/review_summary/2026-08-19_1422_exp34_update0819_ood_implementation_execution_review.md`.
+
+## 2026-08-19 14:44 HKT Exp34 Per-sample Protein Attribution
+
+- Added `utils/attribution_utils.py` with lightweight, model-agnostic batched
+  Gradient x Delta, midpoint Integrated Gradients, completeness, deterministic
+  ranking, stability, and NaN-median baseline helpers.
+- Added `scripts/attribute_exp34_update0819_ood_epoch2.py` to reconstruct the
+  exact formal Exp34 model/data context from run manifests, require execution
+  in `gpu1_deep:0`, reproduce published probabilities, and attribute the
+  response logit to all 11,092 control-expression proteins.
+- The reference is the per-protein median of 498 unique control-expression rows
+  referenced by the checkpoint training split. The 132 proteins that are all
+  NaN across those rows receive baseline zero; the baseline and exact axes are
+  saved with hashes.
+- Added `tests/test_exp34_protein_attribution.py`. The new attribution, Exp34
+  builder, and fast-dataset suite passed with `14 passed, 4 subtests passed`.
+- H200 smoke used two samples per target branch and IG-4/8. It reproduced
+  published probabilities within `1.12e-08`, emitted 44,368 finite attribution
+  rows, and had zero completeness warnings.
+- Formal IG-32 completed all 28 samples without adaptive IG-64 reruns. It
+  reproduced probabilities exactly, emitted 310,576 sample-protein rows, and
+  had zero completeness warnings. Maximum absolute completeness error was
+  `0.000182`; Gradient x Delta versus IG Top-100 overlap was `0.88..0.96` and
+  full-axis absolute-value Spearman was `0.981..0.992`.
+- Full Parquet, per-sample absolute/positive/negative rankings, diagnostics,
+  baseline, axes, JSON, and Markdown are under
+  `outputs/2026-08/2026-08-19/20260819_exp34_update0819_ood_epoch2_protein_attribution`.
+
+## 2026-08-21 16:31 HKT Exp35 Update-0821 CSV-driven Manual-target Inference
+
+- Added `utils/35_build_update0821_target_training_ready.py` to consume the
+  August 21 CSV `target` column directly. It normalizes semicolon-separated
+  UniProt accessions, rejects empty/invalid/conflicting sets and duplicate
+  cell-drug keys, verifies membership in the 11,092-protein checkpoint axis,
+  and records the input path/SHA and normalized targets in the build summary.
+- Exp35 contains only the requested manual-target task. Daraxonrasib maps to
+  `[1374,1375,1376]` (NRAS, HRAS, KRAS) and zoldonrasib maps to `[1376]`
+  (KRAS). The two chemical-OOD PDI rows remain zero; targets enter through the
+  model target-token path, matching the validated Exp34 mechanism branch.
+- Added `scripts/exp_35_update0821_target_epoch2_infer.sh` and generalized the
+  Exp34 runner so the builder, task list, experiment label, and required tmux
+  target can be supplied safely. CUDA jobs require `gpu1:0`; a new preflight
+  checks both the NVIDIA driver and `torch.cuda.is_available()` before costly
+  runtime construction.
+- Added `scripts/report_exp35_update0821_target_epoch2.py`. It exports the
+  14-row prediction table, `14 x 11092` perturbed-proteome CSV, model-input
+  matched-control CSV with original NaN counts, axes/audits, and a strict
+  regression against the August 19 mechanism branch.
+- Added `scripts/attribute_exp35_update0821_target_epoch2.py` and generalized
+  the prior attribution engine for a one-task experiment. Formal IG-32/64
+  produced full per-sample attribution parquet plus Top-200 absolute and
+  Top-100 signed rankings; no aggregate rank is emitted.
+- Added `tests/test_exp35_update0821_target.py`; all seven standard-library
+  unit tests passed. H200 smoke and formal execution ran in the `gpu1` tmux
+  session. Formal probabilities and perturbed expression are exactly equal to
+  the prior mechanism branch; the legacy decimal control CSV agrees within
+  `9.54e-7` (the declared `1e-6` float32 round-trip tolerance).
+- All 14 sensitivity probabilities are below the fixed `0.5` threshold
+  (`0.011503..0.041512`) and are labeled `non-responsive`. This is the model's
+  negative response class, not a validated clinical-resistance claim.
+- Detailed execution evidence is recorded in `docs/training_history.md` and
+  `data/review_summary/2026-08-21_1631_exp35_update0821_target_implementation_execution_review.md`.

@@ -35,6 +35,10 @@ DEFAULT_PTV1_EXPERIMENT_TYPE_DIR = REPO_ROOT / "data" / "rawdata" / "ptv1" / "ex
 
 PTV3_MAIN_SINGLE = "ptv3_main_singledrug"
 PTV3_MAIN_DOUBLE = "ptv3_main_doubledrug"
+PTV3_MAIN_SINGLE_PRISM2 = "ptv3_main_singledrug_prism2"
+PTV3_MAIN_DOUBLE_PRISM2AUX = "ptv3_main_doubledrug_prism2aux"
+PTV3_MAIN_SINGLE_TASKS = {PTV3_MAIN_SINGLE, PTV3_MAIN_SINGLE_PRISM2}
+PTV3_MAIN_DOUBLE_TASKS = {PTV3_MAIN_DOUBLE, PTV3_MAIN_DOUBLE_PRISM2AUX}
 PTV3_EXTRA_TEST_TASKS = {
     "ptv3_extra_singledrug_mat1_480_faims",
     "ptv3_extra_singledrug_mat1_qe",
@@ -113,6 +117,59 @@ def normalized_series(df: pd.DataFrame, column: str, default: str = "no") -> pd.
         return pd.Series([default] * len(df), index=df.index, dtype="object")
     values = df[column].astype("string").fillna("").str.strip()
     return values.mask(values.eq(""), default).astype("object")
+
+
+PTV1_DRUG_PLACEHOLDERS = {"", "na", "nan", "no", "none", "null"}
+
+
+def clean_ptv1_drug_id(value: object) -> str:
+    text = normalize_text(value)
+    if text.lower() in PTV1_DRUG_PLACEHOLDERS:
+        return ""
+    return text
+
+
+def canonical_ptv1_drug_key(drug_ids: Iterable[object]) -> tuple[str, ...]:
+    cleaned: list[str] = []
+    for drug_id in drug_ids:
+        value = clean_ptv1_drug_id(drug_id)
+        if value and value not in cleaned:
+            cleaned.append(value)
+    if len(cleaned) <= 1:
+        return tuple(cleaned)
+    return tuple(sorted(cleaned))
+
+
+def format_ptv1_drug_key(drug_key: tuple[str, ...]) -> str:
+    return "+".join(drug_key) if drug_key else "no"
+
+
+def parse_ptv1_canonical_key(value: object) -> tuple[str, ...]:
+    text = normalize_text(value)
+    if not text or text.lower() in PTV1_DRUG_PLACEHOLDERS:
+        return ()
+    return canonical_ptv1_drug_key(text.split("+"))
+
+
+def ptv1_row_drug_key(df: pd.DataFrame, row_index: int) -> tuple[str, ...]:
+    if "ptv1_canonical_pert_key" in df.columns:
+        parsed = parse_ptv1_canonical_key(df.at[row_index, "ptv1_canonical_pert_key"])
+        if parsed:
+            return parsed
+    return canonical_ptv1_drug_key(
+        [
+            df.at[row_index, "pert_id1"] if "pert_id1" in df.columns else "",
+            df.at[row_index, "pert_id2"] if "pert_id2" in df.columns else "",
+        ]
+    )
+
+
+def ptv1_split_cell_value(df: pd.DataFrame, row_index: int) -> str:
+    if "ptv1_split_cell" in df.columns:
+        value = normalize_text(df.at[row_index, "ptv1_split_cell"])
+        if value:
+            return value
+    return normalize_text(df.at[row_index, "Cell_plate"] if "Cell_plate" in df.columns else "")
 
 
 def as_bool_series(df: pd.DataFrame, column: str, default: bool = False) -> pd.Series:
@@ -227,7 +284,7 @@ def build_pert_pair_column(df: pd.DataFrame) -> pd.Series:
     for left, right in zip(pert1, pert2):
         left_text = str(left)
         right_text = str(right)
-        if right_text == "no":
+        if right_text == "no" or right_text == left_text:
             pairs.append(left_text)
         else:
             first, second = sorted([left_text, right_text])
@@ -542,8 +599,16 @@ def append_train_only_anchors(payload: SplitPayload, train_only_indices: list[in
 
 
 def task_label_columns(task_name: str) -> list[str]:
-    if task_name in {PTV3_MAIN_DOUBLE, "ptv3_extra_doubledrug_guomics", "ptv3_extra_doubledrug_nc", "ptv3_extra_doubledrug_nature"}:
+    if task_name in {
+        PTV3_MAIN_DOUBLE,
+        PTV3_MAIN_DOUBLE_PRISM2AUX,
+        "ptv3_extra_doubledrug_guomics",
+        "ptv3_extra_doubledrug_nc",
+        "ptv3_extra_doubledrug_nature",
+    }:
         return ["synergy"]
+    if task_name == PTV3_MAIN_SINGLE_PRISM2:
+        return ["PRISM2nd_label_total"]
     if task_name in PTV3_EXTRA_TEST_TASKS or task_name == PTV1_EXTRA_TEST:
         return ["PRISM2nd_label_total"]
     return ["PRISM1st_label_total"]
@@ -641,8 +706,8 @@ def make_test_only(indices: list[int]) -> SplitPayload:
     )
 
 
-def parse_ptv1_experiment_type_file(path: Path) -> set[tuple[str, str]]:
-    pairs: set[tuple[str, str]] = set()
+def parse_ptv1_experiment_type_file(path: Path) -> set[tuple[str, tuple[str, ...]]]:
+    pairs: set[tuple[str, tuple[str, ...]]] = set()
     with path.open("r", encoding="utf-8") as handle:
         for line in handle:
             stripped = line.strip()
@@ -650,13 +715,13 @@ def parse_ptv1_experiment_type_file(path: Path) -> set[tuple[str, str]]:
                 continue
             parts = stripped.split()
             first_cell, first_pert = parts[0].split("_", 1)
-            pairs.add((normalize_text(first_cell), normalize_text(first_pert)))
-            for pert_id in parts[1:]:
-                pairs.add((normalize_text(first_cell), normalize_text(pert_id)))
+            drug_key = canonical_ptv1_drug_key([first_pert, *parts[1:]])
+            if drug_key:
+                pairs.add((normalize_text(first_cell), drug_key))
     return pairs
 
 
-def load_ptv1_experiment_type_pairs(split_dir: Path) -> dict[str, set[tuple[str, str]]]:
+def load_ptv1_experiment_type_pairs(split_dir: Path) -> dict[str, set[tuple[str, tuple[str, ...]]]]:
     return {
         "train": parse_ptv1_experiment_type_file(split_dir / "train_experiment_type_list.txt"),
         "valid": parse_ptv1_experiment_type_file(split_dir / "val_experiment_type_list.txt"),
@@ -672,17 +737,20 @@ def make_ptv1_experiment_type_split(
 ) -> tuple[SplitPayload, dict[str, Any]]:
     split_pairs = load_ptv1_experiment_type_pairs(experiment_type_dir)
     split_rows: dict[str, list[int]] = {"train": [], "valid": [], "test": []}
+    split_double_rows: dict[str, int] = {"train": 0, "valid": 0, "test": 0}
     unmatched: list[int] = []
     unmatched_examples: list[dict[str, str | int]] = []
 
-    cell_plate = normalized_series(df, "Cell_plate", default="")
     pert_id1 = normalized_series(df, "pert_id1", default="")
+    pert_id2 = normalized_series(df, "pert_id2", default="")
     for idx in indices:
-        key = (normalize_text(cell_plate.iloc[idx]), normalize_text(pert_id1.iloc[idx]))
+        drug_key = ptv1_row_drug_key(df, idx)
+        key = (ptv1_split_cell_value(df, idx), drug_key)
         assigned = False
         for split_name, pairs in split_pairs.items():
             if key in pairs:
                 split_rows[split_name].append(int(idx))
+                split_double_rows[split_name] += int(len(drug_key) == 2)
                 assigned = True
                 break
         if not assigned:
@@ -691,25 +759,32 @@ def make_ptv1_experiment_type_split(
                 unmatched_examples.append(
                     {
                         "row_index": int(idx),
-                        "Cell_plate": key[0],
-                        "pert_id1": key[1],
+                        "ptv1_split_cell": key[0],
+                        "pert_id1": normalize_text(pert_id1.iloc[idx]),
+                        "pert_id2": normalize_text(pert_id2.iloc[idx]),
+                        "ptv1_canonical_pert_key": format_ptv1_drug_key(drug_key),
                     }
                 )
 
     audit = {
         "experiment_type_dir": str(experiment_type_dir),
         "pair_counts": {split_name: len(pairs) for split_name, pairs in split_pairs.items()},
+        "raw_double_pair_counts": {
+            split_name: sum(1 for _, drug_key in pairs if len(drug_key) == 2)
+            for split_name, pairs in split_pairs.items()
+        },
         "matched_anchor_count": sum(len(rows) for rows in split_rows.values()),
+        "matched_double_anchor_counts": split_double_rows,
         "unmatched_anchor_count": len(unmatched),
         "unmatched_anchor_examples": unmatched_examples,
-        "matching_key": ["Cell_plate", "pert_id1"],
+        "matching_key": ["ptv1_split_cell", "canonical single-drug id or unordered Library_id+Anchor_id pair"],
     }
     return SplitPayload(
         strategy="fixed_experiment_type",
         train=unique_sorted(split_rows["train"]),
         valid=unique_sorted(split_rows["valid"]),
         test=unique_sorted(split_rows["test"]),
-        policy="PTV1 fixed split parsed directly from data/rawdata/ptv1/experiment_type_list using (Cell_plate, pert_id1)",
+        policy="PTV1 fixed split parsed directly from data/rawdata/ptv1/experiment_type_list using (ptv1_split_cell, canonical single-drug id or unordered Library_id+Anchor_id pair)",
     ), audit
 
 
@@ -728,7 +803,7 @@ def build_task_splits(
 ) -> dict[str, Any]:
     df = add_internal_group_columns(read_feature_table(task_dir).reset_index(drop=True))
     anchor_memberships = {"primary"}
-    if dataset_group == "ptv3" and task_name == PTV3_MAIN_DOUBLE:
+    if dataset_group == "ptv3" and task_name in PTV3_MAIN_DOUBLE_TASKS:
         anchor_memberships = {"primary", "merged_single_drug"}
     set_info, row_to_set_index, set_to_grouping, anchor_indices, pairing_audit = build_pairing_metadata(
         df,
@@ -737,18 +812,17 @@ def build_task_splits(
     primary_anchor_indices = anchors_with_membership(df, anchor_indices, memberships={"primary"})
     auxiliary_single_train_indices: list[int] = []
     label_coverage_anchor_indices = anchor_indices
-    if dataset_group == "ptv3" and task_name == PTV3_MAIN_DOUBLE:
+    if dataset_group == "ptv3" and task_name in PTV3_MAIN_DOUBLE_TASKS:
         auxiliary_single_train_indices = anchors_with_membership(
             df,
             anchor_indices,
             memberships={"merged_single_drug"},
-            source_task=PTV3_MAIN_SINGLE,
         )
         label_coverage_anchor_indices = primary_anchor_indices
         pairing_audit["primary_valid_anchor_count"] = len(primary_anchor_indices)
         pairing_audit["auxiliary_train_anchor_count"] = len(auxiliary_single_train_indices)
         pairing_audit["auxiliary_train_rule"] = (
-            "`ptv3_main_singledrug` rows merged into the double-drug feature table "
+            "Merged single-drug rows in the double-drug feature table "
             "are appended to every double-drug train split only. They are excluded "
             "from double-drug valid/test splits because they do not have synergy labels."
         )
@@ -761,7 +835,7 @@ def build_task_splits(
     payloads: list[SplitPayload] = []
     implementation_notes: list[str] = []
 
-    if dataset_group == "ptv3" and task_name == PTV3_MAIN_SINGLE:
+    if dataset_group == "ptv3" and task_name in PTV3_MAIN_SINGLE_TASKS:
         payloads.append(make_random_payload(anchor_indices, rng=rng, train_ratio=train_ratio, valid_ratio=valid_ratio))
         payloads.append(
             create_group_split(
@@ -851,7 +925,7 @@ def build_task_splits(
                 subset_test_ratio=subset_test_ratio,
             )
         )
-    elif dataset_group == "ptv3" and task_name == PTV3_MAIN_DOUBLE:
+    elif dataset_group == "ptv3" and task_name in PTV3_MAIN_DOUBLE_TASKS:
         payloads.extend(
             create_group_folds(
                 df,
@@ -869,7 +943,7 @@ def build_task_splits(
                 append_train_only_anchors(
                     payload,
                     auxiliary_single_train_indices,
-                    reason="all merged `ptv3_main_singledrug` anchors are added to train only",
+                    reason="all merged single-drug anchors are added to train only",
                 )
                 for payload in payloads
             ]
@@ -882,7 +956,7 @@ def build_task_splits(
                     subset_test_ratio=subset_test_ratio,
                 ),
                 auxiliary_single_train_indices,
-                reason="all merged `ptv3_main_singledrug` anchors are added to train only",
+                reason="all merged single-drug anchors are added to train only",
             )
         )
         implementation_notes.append(
@@ -917,12 +991,12 @@ def build_task_splits(
             create_group_folds(
                 df,
                 anchor_indices,
-                column="_split_pert_id",
+                column="_split_pert_pair",
                 strategy_prefix="pert_id",
                 rng=rng,
                 n_folds=n_folds,
                 valid_ratio=valid_ratio,
-                policy="PTV1 5-fold group split by pert_id1",
+                policy="PTV1 5-fold group split by single-drug id or canonical unordered Library_id+Anchor_id pair",
             )
         )
         payloads.append(
@@ -934,7 +1008,7 @@ def build_task_splits(
             )
         )
         implementation_notes.append(
-            "PTV1 fixed_experiment_type is parsed directly from rawdata/ptv1/experiment_type_list; random split is also generated for PTV1."
+            "PTV1 fixed_experiment_type is parsed directly from rawdata/ptv1/experiment_type_list; combo lines are kept as canonical unordered pairs. PTV1 pert_id_5fold folds also use the single-drug id or canonical pair key."
         )
     elif dataset_group == "ptv1" and task_name == PTV1_EXTRA_TEST:
         payloads.append(make_test_only(anchor_indices))
@@ -958,7 +1032,7 @@ def build_task_splits(
         "label_coverage": check_label_coverage(df, label_coverage_anchor_indices, task_name),
         "label_coverage_anchor_rule": (
             "primary double-drug anchors only"
-            if dataset_group == "ptv3" and task_name == PTV3_MAIN_DOUBLE
+            if dataset_group == "ptv3" and task_name in PTV3_MAIN_DOUBLE_TASKS
             else (
                 "test_label-filtered valid anchors"
                 if dataset_group == "ptv3" and task_name in PTV3_EXTRA_DOUBLE_TEST_TASKS

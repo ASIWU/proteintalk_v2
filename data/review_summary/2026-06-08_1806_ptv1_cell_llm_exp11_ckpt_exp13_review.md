@@ -37,4 +37,4 @@
   - AUROC `0.641635781671159`;
   - nAUPRC `1.2264773286503161`;
   - rows `218`.
-- Full ranking written to `outputs/20260608_ptv1_exp11_all_ckpts_on_exp13_direct_metrics.tsv`.
+- Full ranking written to `outputs/2026-06/2026-06-08/20260608_ptv1_exp11_all_ckpts_on_exp13_direct_metrics.tsv`.

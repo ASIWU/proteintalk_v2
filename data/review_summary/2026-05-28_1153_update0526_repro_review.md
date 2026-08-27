@@ -17,5 +17,5 @@
 
 ## Artifacts
 - Runtime summary: `logs/20260528_repro_update0526_h512_lr2e4_v1_runtime_summary.tsv`
-- Scripted filtered exp08 output: `outputs/20260528_repro_update0526_h512_lr2e4_v1_exp08_extra_double_all_train_infer_all_single_double_for_extra`
-- All-anchor exp08 output matching 20260526: `outputs/20260528_repro_update0526_h512_lr2e4_v1_exp08_extra_double_all_train_infer_all_single_double_for_extra_allanchors`
+- Scripted filtered exp08 output: `outputs/2026-05/2026-05-28/20260528_repro_update0526_h512_lr2e4_v1_exp08_extra_double_all_train_infer_all_single_double_for_extra`
+- All-anchor exp08 output matching 20260526: `outputs/2026-05/2026-05-28/20260528_repro_update0526_h512_lr2e4_v1_exp08_extra_double_all_train_infer_all_single_double_for_extra_allanchors`

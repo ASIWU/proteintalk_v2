@@ -77,6 +77,7 @@ bash scripts/exp_01_single_pert_stratified_5fold.sh
 | `exp_02_single_cell_type_5fold.sh` | single-drug 5-fold, `cell_type` split |
 | `exp_03_single_cell_5fold.sh` | single-drug 5-fold, `cell` split |
 | `exp_04_single_no_mse_5fold.sh` | single-drug no-MSE ablation; adds `--no-mse-loss` |
+| `exp_04_v2_single_no_mse_random_baseline_5fold.sh` | single-drug no-MSE ablation with saved random control proteome |
 | `exp_05_single_no_pdi_5fold.sh` | single-drug no-PDI ablation |
 | `exp_06_double_pert_pair_5fold.sh` | double-drug canonical pert-pair 5-fold |
 | `exp_07_extra_single_all_train_infer.sh` | train all single-drug data, then infer extra single datasets |
@@ -233,6 +234,7 @@ bash scripts/exp_01_single_pert_stratified_5fold.sh
 Notes:
 
 - `exp_04_single_no_mse_5fold.sh` disables MSE with `--no-mse-loss`.
+- `exp_04_v2_single_no_mse_random_baseline_5fold.sh` also disables MSE and sets `CONTROL_EXPRESSION_MODE=random_saved`.
 - `MSE_WEIGHT=0` makes the weighted MSE contribution zero, but it does not
   change the script identity or ablation naming.
 - `BCE_WEIGHT`, `POSITIVE_WEIGHT`, and `FOCAL_LOSS` are useful when label
@@ -256,6 +258,28 @@ EXP_PREFIX=20260510_focal \
 FOCAL_LOSS=1 \
 bash scripts/exp_06_double_pert_pair_5fold.sh
 ```
+
+## Random Control-Proteome Baseline
+
+`exp_04_v2_single_no_mse_random_baseline_5fold.sh` expects a prebuilt random
+control artifact aligned to `ptv3_main_singledrug` feature-row indices:
+
+```bash
+python scripts/generate_random_control_proteome.py \
+  --task-dir data/training_ready/ptv3/tasks/ptv3_main_singledrug \
+  --policy global_normal_clip \
+  --seed 42
+```
+
+The default artifact path is:
+
+```bash
+data/training_ready/ptv3/tasks/ptv3_main_singledrug/random_control_expression_global_normal_clip_seed42.npy
+```
+
+Override it with `RANDOM_CONTROL_EXPRESSION_PATH=...` if needed.  The launcher
+checks only that the artifact exists; generation should be done in a CPU shell
+before starting the GPU training session.
 
 ## GPU And Performance Variables
 

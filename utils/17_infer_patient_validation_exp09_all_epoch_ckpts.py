@@ -67,7 +67,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--batch-size", default="256")
     parser.add_argument("--force", action="store_true", help="Rerun inference even when predictions already exist.")
-    parser.add_argument("--skip-infer", action="store_true", help="Only rebuild combined/readable outputs from existing predictions.")
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
+        "--infer-only",
+        action="store_true",
+        help="Only run per-checkpoint/task inference; do not read or combine predictions.",
+    )
+    mode_group.add_argument(
+        "--skip-infer",
+        action="store_true",
+        help="Only rebuild combined/readable outputs from existing predictions.",
+    )
     parser.add_argument("--top-n", type=int, default=20)
     parser.add_argument("--max-checkpoints", type=int, help="Debug helper: only process the first N epoch checkpoints.")
     return parser.parse_args()
@@ -301,12 +311,8 @@ def main() -> None:
     args.build_summary = base.resolve_path(args.build_summary)
     args.feature_summary = base.resolve_path(args.feature_summary)
 
-    build_summary = base.read_json(args.build_summary)
-    feature_summary = base.read_json(args.feature_summary, required=False)
     derived_root = args.training_ready_root / "ptv3" / "derived"
     task_prefix = f"ptv3_{args.run_name}"
-    args.output_root.mkdir(parents=True, exist_ok=True)
-    args.readable_output_dir.mkdir(parents=True, exist_ok=True)
 
     common_args = base.build_common_infer_args(args, derived_root)
     exp09_extra_args = [
@@ -327,6 +333,12 @@ def main() -> None:
     if not checkpoints:
         raise RuntimeError(f"No exp09 epoch checkpoints found under {args.exp09_dir}")
 
+    if not args.infer_only:
+        build_summary = base.read_json(args.build_summary)
+        feature_summary = base.read_json(args.feature_summary, required=False)
+        args.output_root.mkdir(parents=True, exist_ok=True)
+        args.readable_output_dir.mkdir(parents=True, exist_ok=True)
+
     inference_records: list[dict[str, Any]] = []
     frames: list[pd.DataFrame] = []
     generated_at = base.iso_now()
@@ -336,6 +348,18 @@ def main() -> None:
         for task_suffix, treatment_type in task_specs:
             task_name = f"{task_prefix}_{task_suffix}"
             output_dir = args.output_root / meta["checkpoint_label"] / task_name
+            if args.infer_only:
+                print(f"[infer] {meta['checkpoint_label']} {task_name}")
+                base.run_infer(
+                    args=args,
+                    task_name=task_name,
+                    task_head="unified",
+                    checkpoint=checkpoint,
+                    output_dir=output_dir,
+                    common_args=common_args,
+                    extra_args=exp09_extra_args,
+                )
+                continue
             if args.skip_infer:
                 prediction_path = output_dir / "predictions.parquet"
                 if not prediction_path.exists():
@@ -375,6 +399,13 @@ def main() -> None:
                 }
             )
             frames.append(frame)
+
+    if args.infer_only:
+        print(
+            f"[done] inference only: checkpoints={len(checkpoints)} "
+            f"tasks_per_checkpoint={len(task_specs)} output={base.repo_relative(args.output_root)}"
+        )
+        return
 
     combined_raw = pd.concat(frames, ignore_index=True)
     combined_raw_parquet = args.output_root / "combined_predictions.parquet"

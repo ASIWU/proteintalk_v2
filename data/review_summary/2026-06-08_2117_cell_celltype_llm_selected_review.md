@@ -41,8 +41,8 @@ Mean original AUPRC deltas vs `20260604_cell_llm_clip10_tuned_selected_v1`:
 Main artifacts:
 
 - `docs/2026-06-08_cell_celltype_llm_clip10_selected_report.md`
-- `outputs/20260608_cell_celltype_llm_clip10_selected_v1_cell_drug_dose_time_eval.csv`
-- `outputs/20260608_cell_celltype_llm_clip10_selected_v1_cell_celltype_llm_comparison.tsv`
+- `outputs/2026-06/2026-06-08/20260608_cell_celltype_llm_clip10_selected_v1_cell_drug_dose_time_eval.csv`
+- `outputs/2026-06/2026-06-08/20260608_cell_celltype_llm_clip10_selected_v1_cell_celltype_llm_comparison.tsv`
 - `logs/20260608_cell_celltype_llm_clip10_selected_v1_cell_celltype_llm_comparison.md`
 
 ## Validation

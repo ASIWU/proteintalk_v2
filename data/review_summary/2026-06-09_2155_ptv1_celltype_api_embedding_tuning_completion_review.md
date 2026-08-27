@@ -16,7 +16,7 @@ Reviewed and completed the PTV1 graph + frozen Cell LLM + frozen `cell_type` LLM
 - `scripts/ptv1/0427_build_ptv1_derived.sh`
 - `scripts/ptv1/report_ptv1_cell_celltype_llm_tune_results.py`
 - `logs/20260609_ptv1_cell_celltype_llm_tune_v2_api_celltype_cell_celltype_tune_results.md`
-- `outputs/20260609_ptv1_cell_celltype_llm_tune_v2_api_celltype_cell_celltype_tune_results.tsv`
+- `outputs/2026-06/2026-06-09/20260609_ptv1_cell_celltype_llm_tune_v2_api_celltype_cell_celltype_tune_results.tsv`
 - `docs/2026-06-09_ptv1_cell_celltype_llm_exp11_13_tuned_results.md`
 
 ## Completion Summary

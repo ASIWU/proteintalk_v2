@@ -55,6 +55,7 @@ from model.fast_lightning import FastProteinTalkLightning
 from model.graph_feature_utils import build_or_load_graph_features
 from model.training_ready_lightning import ProteinTalkLightning, UnfreezeCallback
 from model.training_ready_models import FAST_DELTA_MODEL_NAME, GRAPH_MODEL_NAMES, ModelArtifacts, SELECTED_MODEL_NAMES, build_model
+from utils.npy_io import safe_np_load
 
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -90,8 +91,78 @@ def json_safe(value: object) -> object:
     return value
 
 
+def resolve_random_control_expression_path(path: str | Path | None) -> str | None:
+    if path is None:
+        return None
+    text = str(path).strip()
+    if not text:
+        return None
+    return str(Path(text).expanduser().resolve())
+
+
+def random_control_expression_meta_path(path: str | Path) -> Path:
+    return Path(path).with_suffix(".meta.json")
+
+
+def load_random_control_expression_matrix(
+    args: argparse.Namespace,
+    artifacts: FastTrainingReadyArtifacts,
+) -> tuple[np.ndarray | None, dict[str, Any]]:
+    mode = str(getattr(args, "control_expression_mode", "real")).lower()
+    if mode not in {"real", "random_saved"}:
+        raise ValueError(f"unsupported control_expression_mode={mode!r}")
+    args.control_expression_mode = mode
+    args.random_control_expression_path_resolved = None
+    if mode == "real":
+        return None, {"mode": "real", "enabled": False}
+
+    resolved_path = resolve_random_control_expression_path(getattr(args, "random_control_expression_path", None))
+    if resolved_path is None:
+        raise ValueError("--random-control-expression-path is required when --control-expression-mode random_saved")
+    path = Path(resolved_path)
+    if not path.exists():
+        raise FileNotFoundError(f"missing random control expression matrix: {path}")
+    matrix = safe_np_load(path, mmap_mode="r")
+    if matrix.ndim != 2:
+        raise ValueError(f"random control expression matrix must be 2D; got shape {matrix.shape}")
+    if tuple(matrix.shape) != tuple(artifacts.expression_matrix.shape):
+        raise ValueError(
+            "random control expression matrix shape must match feature expression matrix; "
+            f"got {matrix.shape} and {artifacts.expression_matrix.shape}"
+        )
+    if matrix.dtype != np.float32:
+        raise ValueError(f"random control expression matrix must be float32; got {matrix.dtype}")
+
+    args.random_control_expression_path_resolved = str(path)
+    meta_path = random_control_expression_meta_path(path)
+    meta: dict[str, Any] = {}
+    if meta_path.exists():
+        loaded_meta = load_json(meta_path)
+        if isinstance(loaded_meta, dict):
+            meta = loaded_meta
+    summary = {
+        "mode": mode,
+        "enabled": True,
+        "path": str(path),
+        "meta_path": str(meta_path) if meta_path.exists() else None,
+        "shape": [int(matrix.shape[0]), int(matrix.shape[1])],
+        "seed": meta.get("seed"),
+        "control_row_count": meta.get("control_row_count"),
+        "fallback_protein_count": meta.get("fallback_protein_count"),
+        "mean_fallback_protein_count": meta.get("mean_fallback_protein_count"),
+        "std_fallback_protein_count": meta.get("std_fallback_protein_count"),
+        "clipped_negative_count": meta.get("clipped_negative_count"),
+        "per_protein_stats_policy": meta.get("per_protein_stats_policy"),
+    }
+    return matrix, summary
+
+
 def infer_label_key(task_name: str) -> str:
-    if "extra_singledrug" in task_name or task_name == "ptv1_extra_singledrug":
+    if (
+        "extra_singledrug" in task_name
+        or task_name == "ptv1_extra_singledrug"
+        or task_name == "ptv3_main_singledrug_prism2"
+    ):
         return "PRISM2nd_label_total"
     return "PRISM1st_label_total"
 
@@ -448,9 +519,9 @@ def build_fast_target_expression_weights(
     if weight_path.exists() and meta_path.exists() and not bool(getattr(args, "force_target_expression_cache_rebuild", False)):
         meta = load_json(meta_path)
         meta["cache_hit"] = True
-        return np.load(weight_path, mmap_mode="r"), meta
+        return safe_np_load(weight_path, mmap_mode="r"), meta
 
-    pdi = np.load(pdi_matrix_path, mmap_mode="r")
+    pdi = safe_np_load(pdi_matrix_path, mmap_mode="r")
     if pdi.ndim != 2:
         raise ValueError(f"PDI matrix must be 2D; got {pdi.shape}")
     n_drugs, n_proteins = int(pdi.shape[0]), int(pdi.shape[1])
@@ -461,14 +532,14 @@ def build_fast_target_expression_weights(
     ppi = None
     ppi_degree = None
     if mode == "pdi_ppi" and ppi_topk > 0 and ppi_alpha > 0.0:
-        ppi = np.load(ppi_matrix_path, mmap_mode="r")
+        ppi = safe_np_load(ppi_matrix_path, mmap_mode="r")
         if ppi.ndim != 2 or ppi.shape[0] != n_proteins or ppi.shape[1] <= int(ordered[valid_gene].max(initial=0)):
             raise ValueError(f"PPI matrix shape {ppi.shape} is incompatible with PDI proteins and expression axis")
         if ppi_norm != "raw" or degree_penalty > 0.0:
             ppi_degree = np.asarray(ppi, dtype=np.float32).sum(axis=1)
             ppi_degree = np.nan_to_num(ppi_degree, nan=0.0, posinf=0.0, neginf=0.0)
     elif degree_penalty > 0.0:
-        ppi = np.load(ppi_matrix_path, mmap_mode="r")
+        ppi = safe_np_load(ppi_matrix_path, mmap_mode="r")
         if ppi.ndim != 2 or ppi.shape[1] <= int(ordered[valid_gene].max(initial=0)):
             raise ValueError(f"PPI matrix shape {ppi.shape} is incompatible with expression axis")
         ppi_degree = np.asarray(ppi, dtype=np.float32).sum(axis=1)
@@ -574,7 +645,7 @@ def build_fast_target_expression_weights(
         "degree_penalty": float(degree_penalty),
     }
     dump_json(meta_path, json_safe(meta))
-    return np.load(weight_path, mmap_mode="r"), meta
+    return safe_np_load(weight_path, mmap_mode="r"), meta
 
 
 def parse_limit_batches(value: str) -> int | float:
@@ -1004,6 +1075,7 @@ def build_fast_data_loaders(
         artifacts=artifacts,
         training_ready_root=Path(args.training_ready_root),
     )
+    random_control_expression_matrix, control_expression_summary = load_random_control_expression_matrix(args, artifacts)
     dataset_kwargs = {
         "artifacts": artifacts,
         "drug_embedding_matrix": drug_embedding,
@@ -1020,6 +1092,8 @@ def build_fast_data_loaders(
         "prior_feature_matrix": prior_feature_matrix,
         "cell_type_feature_matrix": cell_type_feature_matrix,
         "cell_type_llm_feature_matrix": cell_type_llm_feature_matrix,
+        "control_expression_mode": args.control_expression_mode,
+        "random_control_expression_matrix": random_control_expression_matrix,
     }
     train_dataset = FastProteinTalkDataset(
         indices=train_indices,
@@ -1113,6 +1187,7 @@ def build_fast_data_loaders(
         "cell_prior": prior_summary,
         "cell_llm": cell_llm_summary,
         "cell_type_llm": cell_type_llm_summary,
+        "control_expression": control_expression_summary,
     }
     return train_loader, valid_loader, test_loader, split_summary, train_indices
 
@@ -1454,7 +1529,7 @@ def build_fast_mse_gene_weights(
         selected[top_indices] = True
         selected_counts["variance"] = int(top_indices.shape[0])
     if mode in {"pdi", "variance_pdi"}:
-        pdi_matrix = np.load(pdi_matrix_path, mmap_mode="r")
+        pdi_matrix = safe_np_load(pdi_matrix_path, mmap_mode="r")
         if "pert_index1" not in artifacts.df.columns:
             raise ValueError("PDI gene weighting requires pert_index1 in feature_table")
         train_drugs = np.unique(pd_to_int_array(artifacts.df.iloc[train_indices]["pert_index1"]))
@@ -1684,7 +1759,7 @@ def run_fast_training(args: argparse.Namespace) -> None:
             include_multihop=args.graph_multihop,
             force_rebuild=args.force_graph_cache_rebuild,
         )
-    ddi_matrix = np.load(ddi_matrix_path, mmap_mode="r") if args.use_ddi else None
+    ddi_matrix = safe_np_load(ddi_matrix_path, mmap_mode="r") if args.use_ddi else None
     train_loader, valid_loader, test_loader, split_summary, train_indices = build_fast_data_loaders(
         args,
         artifacts,
@@ -1778,6 +1853,12 @@ def run_fast_training(args: argparse.Namespace) -> None:
         response_delta_detach=args.response_delta_detach,
         delta_logit_scale=args.delta_logit_scale,
         delta_logit_learnable=args.delta_logit_learnable,
+        response_trajectory_mode=args.response_trajectory_mode,
+        response_trajectory_dim=args.response_trajectory_dim,
+        response_trajectory_seed=args.response_trajectory_seed,
+        response_trajectory_detach=args.response_trajectory_detach,
+        trajectory_logit_scale=args.trajectory_logit_scale,
+        trajectory_logit_learnable=args.trajectory_logit_learnable,
         aux_covariate_sizes=aux_covariate_sizes,
         cell_type_feature_dim=cell_type_feature_dim,
         cell_type_fusion_mode=args.cell_llm_fusion_mode,
@@ -1854,6 +1935,7 @@ def run_fast_training(args: argparse.Namespace) -> None:
         "experiment_name": experiment_name,
         "implementation": "fast_delta",
         "dataset_group": args.dataset_group,
+        "training_ready_root": str(training_ready_root.resolve()),
         "task_name": args.task_name,
         "split_strategy": args.split_strategy,
         "model_type": FAST_DELTA_MODEL_NAME,
@@ -1919,6 +2001,12 @@ def run_fast_training(args: argparse.Namespace) -> None:
         "response_delta_detach": args.response_delta_detach,
         "delta_logit_scale": args.delta_logit_scale,
         "delta_logit_learnable": args.delta_logit_learnable,
+        "response_trajectory_mode": args.response_trajectory_mode,
+        "response_trajectory_dim": args.response_trajectory_dim,
+        "response_trajectory_seed": args.response_trajectory_seed,
+        "response_trajectory_detach": args.response_trajectory_detach,
+        "trajectory_logit_scale": args.trajectory_logit_scale,
+        "trajectory_logit_learnable": args.trajectory_logit_learnable,
         "aux_covariate_loss_fields": list(args.aux_covariate_loss_fields),
         "aux_covariate_loss_indices": list(aux_covariate_indices),
         "aux_covariate_loss_weight": args.aux_covariate_loss_weight,
@@ -2045,6 +2133,9 @@ def run_fast_training(args: argparse.Namespace) -> None:
         "init_delta_scale": args.init_delta_scale,
         "zero_init_delta_head": args.zero_init_delta_head,
         "control_expression_dropout": args.control_expression_dropout,
+        "control_expression_mode": args.control_expression_mode,
+        "random_control_expression_path": getattr(args, "random_control_expression_path_resolved", None),
+        "random_control_expression_summary": json_safe(split_summary.get("control_expression", {})),
         "save_top_k": args.save_top_k,
         "save_last_ckpt": args.save_last_ckpt,
         "logger_backend": "wandb" if args.log_to_wandb else args.logger_backend,
@@ -2423,6 +2514,17 @@ def main() -> None:
     parser.add_argument("--delta-logit-scale", type=float, default=0.0)
     parser.add_argument("--delta-logit-learnable", action="store_true")
     parser.add_argument(
+        "--response-trajectory-mode",
+        choices=["off", "summary", "drug", "gate"],
+        default="off",
+        help="Add a PTV1-flow-like expression trajectory response branch using control, predicted perturb, and delta.",
+    )
+    parser.add_argument("--response-trajectory-dim", type=int, default=64)
+    parser.add_argument("--response-trajectory-seed", type=int, default=37)
+    parser.add_argument("--response-trajectory-detach", action="store_true")
+    parser.add_argument("--trajectory-logit-scale", type=float, default=0.0)
+    parser.add_argument("--trajectory-logit-learnable", action="store_true")
+    parser.add_argument(
         "--aux-covariate-loss-fields",
         nargs="*",
         default=[],
@@ -2525,6 +2627,17 @@ def main() -> None:
         default=0.0,
         help="Training-only inverted dropout on the control expression input.",
     )
+    parser.add_argument(
+        "--control-expression-mode",
+        choices=["real", "random_saved"],
+        default="real",
+        help="Use the paired real control row or a saved random control proteome aligned by feature row index.",
+    )
+    parser.add_argument(
+        "--random-control-expression-path",
+        default=None,
+        help="Path to random_control_expression_seed*.npy when --control-expression-mode random_saved is used.",
+    )
     parser.add_argument("--log-dir", default="logs")
     parser.add_argument("--checkpoint-dir", default="checkpoints")
     parser.add_argument("--num-workers", type=int, default=4)
@@ -2606,6 +2719,8 @@ def main() -> None:
     if args.model_type == FAST_DELTA_MODEL_NAME:
         run_fast_training(args)
         return
+    if args.control_expression_mode != "real":
+        raise ValueError("--control-expression-mode random_saved is only supported with --model-type fast_delta")
     checkpoint_selection = resolve_checkpoint_selection(args)
     scheduler_monitor, scheduler_monitor_mode = resolve_scheduler_monitor(checkpoint_selection)
 
@@ -2704,6 +2819,7 @@ def main() -> None:
         "run_status": "fit_started",
         "experiment_name": experiment_name,
         "dataset_group": args.dataset_group,
+        "training_ready_root": str(training_ready_root.resolve()),
         "task_name": args.task_name,
         "split_strategy": args.split_strategy,
         "model_type": args.model_type,

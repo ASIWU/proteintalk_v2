@@ -22,9 +22,9 @@ Key output paths:
 
 - Runtime summary: `logs/20260526_h512_nauprc_2gpu_offline_v1_runtime_summary.tsv`
 - Launcher log: `logs/20260526_h512_nauprc_2gpu_offline_v1_launcher.log`
-- Extra single outputs: `outputs/20260526_h512_nauprc_2gpu_offline_v1_exp07_extra_single_all_train_infer_all_single_for_extra`
-- Extra double outputs: `outputs/20260526_h512_nauprc_2gpu_offline_v1_exp08_extra_double_all_train_infer_all_single_double_for_extra`
-- Extra double grouped report: `outputs/20260526_h512_nauprc_2gpu_offline_v1_exp08_extra_double_all_train_infer_all_single_double_for_extra/extra_doubledrug_test_label_auprc.csv`
+- Extra single outputs: `outputs/2026-05/2026-05-26/20260526_h512_nauprc_2gpu_offline_v1_exp07_extra_single_all_train_infer_all_single_for_extra`
+- Extra double outputs: `outputs/2026-05/2026-05-26/20260526_h512_nauprc_2gpu_offline_v1_exp08_extra_double_all_train_infer_all_single_double_for_extra`
+- Extra double grouped report: `outputs/2026-05/2026-05-26/20260526_h512_nauprc_2gpu_offline_v1_exp08_extra_double_all_train_infer_all_single_double_for_extra/extra_doubledrug_test_label_auprc.csv`
 
 ## Active Model Defaults
 

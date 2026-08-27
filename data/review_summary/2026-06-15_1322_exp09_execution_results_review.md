@@ -22,8 +22,8 @@
 
 - Result doc: `docs/2026-06-15_exp09_unified_head_valid_oracle_results.md`
 - Detailed markdown report: `logs/20260615_1101_exp09_selectedref_v1_unified_all_single_double_for_extra_valid_oracle_eval.md`
-- Detailed CSV: `outputs/20260615_1101_exp09_selectedref_v1_unified_all_single_double_for_extra_valid_oracle_eval.csv`
-- Detailed JSON: `outputs/20260615_1101_exp09_selectedref_v1_unified_all_single_double_for_extra_valid_oracle_eval.json`
+- Detailed CSV: `outputs/2026-06/2026-06-15/20260615_1101_exp09_selectedref_v1_unified_all_single_double_for_extra_valid_oracle_eval.csv`
+- Detailed JSON: `outputs/2026-06/2026-06-15/20260615_1101_exp09_selectedref_v1_unified_all_single_double_for_extra_valid_oracle_eval.json`
 
 ## Notes
 

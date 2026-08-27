@@ -46,7 +46,7 @@
 - `bash -n scripts/run_ptv3_training_experiments.sh`
 - `python utils/03_validate_training_ready_outputs.py`
 - `EXP_PREFIX=20260509_confidence2_smoke FOLDS=0 MAX_EPOCHS=1 LIMIT_TRAIN_BATCHES=1 LIMIT_VAL_BATCHES=1 LIMIT_TEST_BATCHES=1 INFER_LIMIT_BATCHES=1 BATCH_SIZE=2 INFER_BATCH_SIZE=2 bash scripts/run_ptv3_training_experiments.sh`
-- `python -u infer.py --dataset-group ptv3 --task-name ptv3_extra_doubledrug_nature --split-strategy test_only --split-name test --checkpoint-path checkpoints/20260509_confidence2_smoke_all_single_double_for_extra/epoch=0.ckpt --output-dir outputs/20260509_confidence2_manifest_axis_probe_double --batch-size 1 --limit-batches 1 --device cpu`
+- `python -u infer.py --dataset-group ptv3 --task-name ptv3_extra_doubledrug_nature --split-strategy test_only --split-name test --checkpoint-path checkpoints/20260509_confidence2_smoke_all_single_double_for_extra/epoch=0.ckpt --output-dir outputs/2026-05/2026-05-09/20260509_confidence2_manifest_axis_probe_double --batch-size 1 --limit-batches 1 --device cpu`
 
 ## Smoke Results
 

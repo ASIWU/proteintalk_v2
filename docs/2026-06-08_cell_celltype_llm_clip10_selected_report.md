@@ -8,8 +8,8 @@
 - Baseline prefix: `20260604_cell_llm_clip10_tuned_selected_v1`
 - Cell LLM artifact: `data/training_ready/ptv3/derived/cell_llm_embedding_qwen3_4096.npz`
 - Cell-type LLM artifact: `data/training_ready/ptv3/derived/cell_type_llm_embedding_qwen3_4096_v2.npz`
-- Main report: `outputs/20260608_cell_celltype_llm_clip10_selected_v1_cell_drug_dose_time_eval.csv`
-- Comparison: `outputs/20260608_cell_celltype_llm_clip10_selected_v1_cell_celltype_llm_comparison.tsv`
+- Main report: `outputs/2026-06/2026-06-08/20260608_cell_celltype_llm_clip10_selected_v1_cell_drug_dose_time_eval.csv`
+- Comparison: `outputs/2026-06/2026-06-08/20260608_cell_celltype_llm_clip10_selected_v1_cell_celltype_llm_comparison.tsv`
 
 ## Prompt Design
 
