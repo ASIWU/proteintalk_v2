@@ -18,7 +18,7 @@ from sklearn.metrics import average_precision_score, roc_auc_score
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_RAW_ROOT = REPO_ROOT / "data" / "rawdata" / "update_0526" / "extra_doubledrug"
+DEFAULT_RAW_ROOT = REPO_ROOT / "data" / "rawdata" / "update_0527" / "extra_doubledrug"
 TEST_LABEL_GROUPS = ("unseenCell_seenDrugCombo", "unseenCell_unseenDrugCombo")
 POSITIVE_LABELS = {"syn", "synergy", "synergistic", "y", "yes", "1", "true"}
 NEGATIVE_LABELS = {"non-syn", "nonsyn", "non-synergy", "non_synergy", "n", "no", "0", "false"}
@@ -31,16 +31,16 @@ class TaskSpec:
 
 
 TASK_SPECS = (
-    TaskSpec("ptv3_extra_doubledrug_guomics", "260525ptv3_Guomics_drug_combo_unique_with_smlies_test_label.csv"),
-    TaskSpec("ptv3_extra_doubledrug_nc", "260525nc_drugComb_info_unique_with_smiles_test_label.csv"),
-    TaskSpec("ptv3_extra_doubledrug_nature", "260525nature_drugComb_info_unique_with_smiles_test_label.csv"),
+    TaskSpec("ptv3_extra_doubledrug_guomics", "260527ptv3_Guomics_drug_combo_all_with_smlies_test_label_dose_final.csv"),
+    TaskSpec("ptv3_extra_doubledrug_nc", "260527nc_drugCombo_info_all_with_smlies_test_label_dose_final.csv"),
+    TaskSpec("ptv3_extra_doubledrug_nature", "260527nature_drugCombo_info_all_with_smlies_test_label_dose_final.csv"),
 )
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Join existing extra double-drug predictions to update_0526 test/test_label "
+            "Join existing extra double-drug predictions to update_0527 test/test_label "
             "metadata and recompute AUROC/AUPRC plus nAUPRC=AUPRC/(positive_count/valid_count) "
             "for each evaluation group."
         )

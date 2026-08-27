@@ -83,16 +83,21 @@ class FastProteinTalkLightning(pl.LightningModule):
         aux_covariate_contrastive_weight: float = 0.0,
         aux_covariate_contrastive_indices: list[int] | None = None,
         aux_covariate_contrastive_temperature: float = 0.2,
+        focal_loss: bool = False,
+        focal_gamma: float = 2.0,
+        focal_alpha: float = 0.0,
         ranking_loss_weight: float = 0.0,
         ranking_loss_margin: float = 0.0,
         ranking_loss_group_index: int | None = None,
+        ranking_loss_hard_negatives: int = 0,
+        ranking_loss_hard_positives: int = 0,
         delta_teacher_loss_weight: float = 0.0,
     ) -> None:
         super().__init__()
         self.model = model
         self.task_head = task_head.lower()
-        if self.task_head not in {"response", "synergy"}:
-            raise ValueError("task_head must be response or synergy")
+        if self.task_head not in {"response", "synergy", "unified"}:
+            raise ValueError("task_head must be response, synergy, or unified")
         self.learning_rate = float(learning_rate)
         self.weight_decay = float(weight_decay)
         self.mse_weight = float(mse_weight)
@@ -141,11 +146,22 @@ class FastProteinTalkLightning(pl.LightningModule):
         self.aux_covariate_contrastive_temperature = float(aux_covariate_contrastive_temperature)
         if self.aux_covariate_contrastive_temperature <= 0.0:
             raise ValueError("aux_covariate_contrastive_temperature must be positive")
+        self.focal_loss = bool(focal_loss)
+        self.focal_gamma = float(focal_gamma)
+        if self.focal_gamma < 0.0:
+            raise ValueError("focal_gamma must be non-negative")
+        self.focal_alpha = float(focal_alpha)
+        if self.focal_alpha < 0.0 or self.focal_alpha >= 1.0:
+            raise ValueError("focal_alpha must be in [0, 1)")
         self.ranking_loss_weight = float(ranking_loss_weight)
         if self.ranking_loss_weight < 0.0:
             raise ValueError("ranking_loss_weight must be non-negative")
         self.ranking_loss_margin = float(ranking_loss_margin)
         self.ranking_loss_group_index = None if ranking_loss_group_index is None else int(ranking_loss_group_index)
+        self.ranking_loss_hard_negatives = int(ranking_loss_hard_negatives)
+        self.ranking_loss_hard_positives = int(ranking_loss_hard_positives)
+        if self.ranking_loss_hard_negatives < 0 or self.ranking_loss_hard_positives < 0:
+            raise ValueError("ranking hard-positive/negative counts must be non-negative")
         self.delta_teacher_loss_weight = float(delta_teacher_loss_weight)
         if self.delta_teacher_loss_weight < 0.0:
             raise ValueError("delta_teacher_loss_weight must be non-negative")
@@ -208,7 +224,19 @@ class FastProteinTalkLightning(pl.LightningModule):
     def _active_label_and_mask(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor, str]:
         if self.task_head == "synergy":
             return batch["label2"].float(), batch["mask2"].float(), "synergy"
+        if self.task_head == "unified":
+            label1 = batch["label1"].float()
+            mask1 = batch["mask1"].float()
+            label2 = batch["label2"].float()
+            mask2 = batch["mask2"].float()
+            use_synergy = mask2 < 0.5
+            return torch.where(use_synergy, label2, label1), torch.where(use_synergy, mask2, mask1), "unified"
         return batch["label1"].float(), batch["mask1"].float(), "response"
+
+    def _active_logits(self, response_logits: torch.Tensor, synergy_logits: torch.Tensor) -> torch.Tensor:
+        if self.task_head == "synergy":
+            return synergy_logits.squeeze(-1)
+        return response_logits.squeeze(-1)
 
     def _losses(
         self,
@@ -232,7 +260,7 @@ class FastProteinTalkLightning(pl.LightningModule):
         expression_true = batch["perturb_expression"].float()
         label, mask, _ = self._active_label_and_mask(batch)
         loss1 = self._mse_loss(expression_pred, expression_true, mask, drug_indices=batch.get("drug_indices"))
-        task_logits = synergy_logits.squeeze(-1) if self.task_head == "synergy" else response_logits.squeeze(-1)
+        task_logits = self._active_logits(response_logits, synergy_logits)
         inactive_logits = response_logits if self.task_head == "synergy" else synergy_logits
         loss2 = self._masked_bce(task_logits, label, mask)
         aux_loss = self._aux_covariate_loss(batch, aux_outputs)
@@ -280,7 +308,7 @@ class FastProteinTalkLightning(pl.LightningModule):
         if teacher_logits is None:
             return batch["control_expression"].new_tensor(0.0)
         response_logits, synergy_logits = teacher_logits
-        logits = synergy_logits.squeeze(-1) if self.task_head == "synergy" else response_logits.squeeze(-1)
+        logits = self._active_logits(response_logits, synergy_logits)
         return self._masked_bce(logits, label, mask)
 
     def _aux_covariate_loss(self, batch: dict[str, torch.Tensor], aux_outputs: list[torch.Tensor]) -> torch.Tensor:
@@ -511,14 +539,27 @@ class FastProteinTalkLightning(pl.LightningModule):
     def _masked_bce(self, logits: torch.Tensor, label: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         weights = 1.0 - mask.float()
         label_flat = label.reshape(-1).float()
+        hard_label_flat = label_flat
         if self.label_smoothing > 0.0:
             label_flat = label_flat * (1.0 - self.label_smoothing) + 0.5 * self.label_smoothing
+        logits_flat = logits.reshape(-1)
         raw = F.binary_cross_entropy_with_logits(
-            logits.reshape(-1),
+            logits_flat,
             label_flat,
             reduction="none",
             pos_weight=self.positive_weight.to(logits.device),
         )
+        if self.focal_loss:
+            prob = torch.sigmoid(logits_flat)
+            pt = torch.where(hard_label_flat >= 0.5, prob, 1.0 - prob).clamp(1e-6, 1.0 - 1e-6)
+            raw = raw * torch.pow(1.0 - pt, self.focal_gamma)
+            if self.focal_alpha > 0.0:
+                alpha = torch.where(
+                    hard_label_flat >= 0.5,
+                    raw.new_full(raw.shape, self.focal_alpha),
+                    raw.new_full(raw.shape, 1.0 - self.focal_alpha),
+                )
+                raw = raw * alpha
         return (raw * weights.reshape(-1)).sum() / weights.sum().clamp_min(1.0)
 
     def _ranking_loss(
@@ -550,6 +591,10 @@ class FastProteinTalkLightning(pl.LightningModule):
             neg_logits = logits[keep & (label < 0.5)]
             if pos_logits.numel() == 0 or neg_logits.numel() == 0:
                 continue
+            if self.ranking_loss_hard_positives > 0 and pos_logits.numel() > self.ranking_loss_hard_positives:
+                pos_logits = torch.topk(pos_logits, k=self.ranking_loss_hard_positives, largest=False).values
+            if self.ranking_loss_hard_negatives > 0 and neg_logits.numel() > self.ranking_loss_hard_negatives:
+                neg_logits = torch.topk(neg_logits, k=self.ranking_loss_hard_negatives, largest=True).values
             diff = pos_logits.reshape(-1, 1) - neg_logits.reshape(1, -1)
             losses.append(F.softplus(self.ranking_loss_margin - diff).mean())
         if not losses:
@@ -634,7 +679,11 @@ class FastProteinTalkLightning(pl.LightningModule):
             "prob1": torch.sigmoid(response_logits.squeeze(-1)).float().detach(),
             "true1": batch["label1"].detach(),
             "mask1": batch["mask1"].detach(),
-            "prob2": torch.sigmoid(synergy_logits.squeeze(-1)).float().detach(),
+            "prob2": (
+                torch.sigmoid(response_logits.squeeze(-1))
+                if self.task_head == "unified"
+                else torch.sigmoid(synergy_logits.squeeze(-1))
+            ).float().detach(),
             "true2": batch["label2"].detach(),
             "mask2": batch["mask2"].detach(),
         }
@@ -658,7 +707,13 @@ class FastProteinTalkLightning(pl.LightningModule):
         mask2 = self._gather_eval_field(outputs, "mask2").numpy()
         response = binary_metrics(true1, prob1, mask1)
         synergy = binary_metrics(true2, prob2, mask2)
-        active = synergy if self.task_head == "synergy" else response
+        if self.task_head == "unified":
+            use_synergy = mask2 < 0.5
+            unified_true = np.where(use_synergy, true2, true1)
+            unified_mask = np.where(use_synergy, mask2, mask1)
+            active = binary_metrics(unified_true, prob1, unified_mask)
+        else:
+            active = synergy if self.task_head == "synergy" else response
         for metric_name, metric_value in active.items():
             self.log(
                 f"{prefix}/task_{metric_name}",
@@ -675,7 +730,10 @@ class FastProteinTalkLightning(pl.LightningModule):
                     prog_bar=metric_name in {"auprc", "auroc", "acc"},
                     sync_dist=True,
                 )
-        for namespace, metrics in (("response", response), ("synergy", synergy)):
+        metric_namespaces = [("response", response), ("synergy", synergy)]
+        if self.task_head == "unified":
+            metric_namespaces.append(("unified", active))
+        for namespace, metrics in metric_namespaces:
             for metric_name, metric_value in metrics.items():
                 self.log(
                     f"{prefix}/{namespace}_{metric_name}",

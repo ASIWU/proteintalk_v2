@@ -133,8 +133,8 @@ exp07 produced the available extra single-drug mat subsets. guomics/nature/nc ar
 ## Output Files
 
 - Full markdown report: `logs/20260601_llm_celltype_full_v1_cell_drug_dose_time_eval.md`
-- CSV: `outputs/20260601_llm_celltype_full_v1_cell_drug_dose_time_eval.csv`
-- JSON: `outputs/20260601_llm_celltype_full_v1_cell_drug_dose_time_eval.json`
+- CSV: `outputs/2026-06/2026-06-01/20260601_llm_celltype_full_v1_cell_drug_dose_time_eval.csv`
+- JSON: `outputs/2026-06/2026-06-01/20260601_llm_celltype_full_v1_cell_drug_dose_time_eval.json`
 - Runtime summary: `logs/20260601_llm_celltype_full_v1_runtime_summary.tsv`
 
 ## Validation

@@ -55,6 +55,7 @@ from model.fast_lightning import FastProteinTalkLightning
 from model.graph_feature_utils import build_or_load_graph_features
 from model.training_ready_lightning import ProteinTalkLightning, UnfreezeCallback
 from model.training_ready_models import FAST_DELTA_MODEL_NAME, GRAPH_MODEL_NAMES, ModelArtifacts, SELECTED_MODEL_NAMES, build_model
+from utils.npy_io import safe_np_load
 
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -90,8 +91,78 @@ def json_safe(value: object) -> object:
     return value
 
 
+def resolve_random_control_expression_path(path: str | Path | None) -> str | None:
+    if path is None:
+        return None
+    text = str(path).strip()
+    if not text:
+        return None
+    return str(Path(text).expanduser().resolve())
+
+
+def random_control_expression_meta_path(path: str | Path) -> Path:
+    return Path(path).with_suffix(".meta.json")
+
+
+def load_random_control_expression_matrix(
+    args: argparse.Namespace,
+    artifacts: FastTrainingReadyArtifacts,
+) -> tuple[np.ndarray | None, dict[str, Any]]:
+    mode = str(getattr(args, "control_expression_mode", "real")).lower()
+    if mode not in {"real", "random_saved"}:
+        raise ValueError(f"unsupported control_expression_mode={mode!r}")
+    args.control_expression_mode = mode
+    args.random_control_expression_path_resolved = None
+    if mode == "real":
+        return None, {"mode": "real", "enabled": False}
+
+    resolved_path = resolve_random_control_expression_path(getattr(args, "random_control_expression_path", None))
+    if resolved_path is None:
+        raise ValueError("--random-control-expression-path is required when --control-expression-mode random_saved")
+    path = Path(resolved_path)
+    if not path.exists():
+        raise FileNotFoundError(f"missing random control expression matrix: {path}")
+    matrix = safe_np_load(path, mmap_mode="r")
+    if matrix.ndim != 2:
+        raise ValueError(f"random control expression matrix must be 2D; got shape {matrix.shape}")
+    if tuple(matrix.shape) != tuple(artifacts.expression_matrix.shape):
+        raise ValueError(
+            "random control expression matrix shape must match feature expression matrix; "
+            f"got {matrix.shape} and {artifacts.expression_matrix.shape}"
+        )
+    if matrix.dtype != np.float32:
+        raise ValueError(f"random control expression matrix must be float32; got {matrix.dtype}")
+
+    args.random_control_expression_path_resolved = str(path)
+    meta_path = random_control_expression_meta_path(path)
+    meta: dict[str, Any] = {}
+    if meta_path.exists():
+        loaded_meta = load_json(meta_path)
+        if isinstance(loaded_meta, dict):
+            meta = loaded_meta
+    summary = {
+        "mode": mode,
+        "enabled": True,
+        "path": str(path),
+        "meta_path": str(meta_path) if meta_path.exists() else None,
+        "shape": [int(matrix.shape[0]), int(matrix.shape[1])],
+        "seed": meta.get("seed"),
+        "control_row_count": meta.get("control_row_count"),
+        "fallback_protein_count": meta.get("fallback_protein_count"),
+        "mean_fallback_protein_count": meta.get("mean_fallback_protein_count"),
+        "std_fallback_protein_count": meta.get("std_fallback_protein_count"),
+        "clipped_negative_count": meta.get("clipped_negative_count"),
+        "per_protein_stats_policy": meta.get("per_protein_stats_policy"),
+    }
+    return matrix, summary
+
+
 def infer_label_key(task_name: str) -> str:
-    if "extra_singledrug" in task_name or task_name == "ptv1_extra_singledrug":
+    if (
+        "extra_singledrug" in task_name
+        or task_name == "ptv1_extra_singledrug"
+        or task_name == "ptv3_main_singledrug_prism2"
+    ):
         return "PRISM2nd_label_total"
     return "PRISM1st_label_total"
 
@@ -110,15 +181,44 @@ def resolve_task_loss_config(
     task_mask_key: str | None = None,
 ) -> dict[str, str]:
     resolved_head = infer_task_head(task_name) if task_head == "auto" else task_head
-    if resolved_head not in {"response", "synergy"}:
-        raise ValueError("task_head must be one of: auto, response, synergy")
-    resolved_label = task_label_key or (effective_key2 if resolved_head == "synergy" else effective_key1)
-    resolved_mask = task_mask_key or ("synergy_label_mask" if resolved_head == "synergy" else "sensitive_label_mask")
+    if resolved_head not in {"response", "synergy", "unified"}:
+        raise ValueError("task_head must be one of: auto, response, synergy, unified")
+    if resolved_head == "unified":
+        resolved_label = task_label_key or effective_key2
+        resolved_mask = task_mask_key or "unified_label_mask"
+    else:
+        resolved_label = task_label_key or (effective_key2 if resolved_head == "synergy" else effective_key1)
+        resolved_mask = task_mask_key or ("synergy_label_mask" if resolved_head == "synergy" else "sensitive_label_mask")
     return {
         "task_head": resolved_head,
         "task_label_key": resolved_label,
         "task_mask_key": resolved_mask,
     }
+
+
+def fast_active_label_from_row(
+    df: Any,
+    row_idx: int,
+    *,
+    label_key: str,
+    task_head: str,
+    response_label_key: str | None = None,
+) -> tuple[float, float]:
+    if task_head == "synergy":
+        if label_key not in df.columns:
+            return 0.0, 1.0
+        return encode_synergy_label(df.at[int(row_idx), label_key])
+    if task_head == "unified":
+        if label_key in df.columns:
+            label2, mask2 = encode_synergy_label(df.at[int(row_idx), label_key])
+            if mask2 < 0.5:
+                return label2, mask2
+        if response_label_key and response_label_key in df.columns:
+            return encode_response_label(df.at[int(row_idx), response_label_key])
+        return 0.0, 1.0
+    if label_key not in df.columns:
+        return 0.0, 1.0
+    return encode_response_label(df.at[int(row_idx), label_key])
 
 
 def category_sizes(meta: dict[str, Any], batch_cov_list: list[str]) -> list[int]:
@@ -133,13 +233,24 @@ def category_sizes(meta: dict[str, Any], batch_cov_list: list[str]) -> list[int]
 
 def default_derived_paths(training_ready_root: Path, dataset_group: str) -> dict[str, Path]:
     derived = training_ready_root / dataset_group / "derived"
+    cell_llm_name = (
+        "cell_llm_embedding_qwen3_4096_v2.npz"
+        if dataset_group == "ptv1"
+        else "cell_llm_embedding_qwen3_4096.npz"
+    )
+    cell_type_llm_name = (
+        "cell_type_llm_embedding_qwen3_4096_v3.npz"
+        if dataset_group == "ptv1"
+        else "cell_type_llm_embedding_qwen3_4096_v2.npz"
+    )
     return {
         "protein_embedding": derived / "protein_embedding_esm.pkl",
         "drug_embedding": derived / "drug_embedding_morgan_2048.pkl",
         "ppi_matrix": derived / "ppi_matrix.npy",
         "pdi_matrix": derived / "pdi_matrix.npy",
         "ddi_matrix": derived / "ddi_matrix.npy",
-        "cell_type_llm_embedding": derived / "cell_type_llm_embedding_qwen3_4096.npz",
+        "cell_llm_embedding": derived / cell_llm_name,
+        "cell_type_llm_embedding": derived / cell_type_llm_name,
     }
 
 
@@ -163,7 +274,76 @@ def apply_dose_covariates(args: argparse.Namespace) -> None:
         args.batch_cov_list = append_unique(list(args.batch_cov_list), args.dose_covariate_fields)
 
 
-def resolve_cell_type_llm_embedding_path(args: argparse.Namespace, training_ready_root: Path, dataset_group: str) -> Path | None:
+def resolve_cell_llm_embedding_path(args: argparse.Namespace, training_ready_root: Path, dataset_group: str) -> Path | None:
+    mode = str(getattr(args, "cell_llm_mode", "off")).lower()
+    if mode == "off":
+        args.cell_llm_embedding_path_resolved = None
+        return None
+    path = (
+        Path(args.cell_llm_embedding_path)
+        if getattr(args, "cell_llm_embedding_path", None)
+        else default_derived_paths(training_ready_root, dataset_group)["cell_llm_embedding"]
+    )
+    args.cell_llm_embedding_path_resolved = str(path.resolve())
+    return path
+
+
+def load_fast_cell_llm_features(
+    *,
+    args: argparse.Namespace,
+    artifacts: FastTrainingReadyArtifacts,
+    training_ready_root: Path,
+) -> tuple[np.ndarray | None, dict[str, Any]]:
+    mode = str(getattr(args, "cell_llm_mode", "off")).lower()
+    if mode == "off":
+        args.cell_llm_embedding_path_resolved = None
+        return None, {"mode": "off", "feature_dim": 0, "enabled": False}
+    if mode != "frozen":
+        raise ValueError(f"unsupported cell_llm_mode: {mode!r}")
+    path = resolve_cell_llm_embedding_path(args, training_ready_root, artifacts.meta["dataset_group"])
+    if path is None or not path.exists():
+        raise FileNotFoundError(f"missing cell LLM embedding artifact: {path}")
+    payload = np.load(path, allow_pickle=False)
+    if "embedding_matrix" in payload.files:
+        embedding_matrix = payload["embedding_matrix"].astype(np.float32, copy=False)
+    else:
+        raise ValueError(f"{path} must contain embedding_matrix")
+    if embedding_matrix.ndim != 2:
+        raise ValueError(f"cell LLM embedding matrix must be 2D, got {embedding_matrix.shape}")
+    index_column = str(getattr(args, "cell_llm_index_column", "Cell_index") or "Cell_index")
+    if index_column not in artifacts.df.columns:
+        raise KeyError(f"cell LLM features require {index_column} in feature_table")
+    import pandas as pd
+
+    row_indices = pd.to_numeric(artifacts.df[index_column], errors="coerce").fillna(0).astype(np.int64).to_numpy()
+    if row_indices.min(initial=0) < 0 or row_indices.max(initial=0) >= embedding_matrix.shape[0]:
+        raise ValueError(
+            f"feature_table {index_column} exceeds cell LLM embedding rows; "
+            f"max_index={int(row_indices.max(initial=0))} rows={embedding_matrix.shape[0]}"
+        )
+    row_features = embedding_matrix[row_indices].astype(np.float32, copy=False)
+    meta = {}
+    if "meta_json" in payload.files:
+        try:
+            meta = json.loads(str(payload["meta_json"].item()))
+        except (json.JSONDecodeError, ValueError, TypeError):
+            meta = {}
+    return row_features, {
+        "mode": mode,
+        "enabled": True,
+        "feature_dim": int(row_features.shape[1]),
+        "embedding_path": str(path.resolve()),
+        "index_column": index_column,
+        "embedding_rows": int(embedding_matrix.shape[0]),
+        "embedding_model": meta.get("embedding_model"),
+        "description_model": meta.get("description_model"),
+        "normalized": meta.get("normalized"),
+    }
+
+
+def resolve_cell_type_llm_embedding_path(
+    args: argparse.Namespace, training_ready_root: Path, dataset_group: str
+) -> Path | None:
     mode = str(getattr(args, "cell_type_llm_mode", "off")).lower()
     if mode == "off":
         args.cell_type_llm_embedding_path_resolved = None
@@ -195,20 +375,19 @@ def load_fast_cell_type_llm_features(
     payload = np.load(path, allow_pickle=False)
     if "embedding_matrix" in payload.files:
         embedding_matrix = payload["embedding_matrix"].astype(np.float32, copy=False)
-    elif "cell_type_embeddings" in payload.files:
-        embedding_matrix = payload["cell_type_embeddings"].astype(np.float32, copy=False)
     else:
-        raise ValueError(f"{path} must contain embedding_matrix or cell_type_embeddings")
+        raise ValueError(f"{path} must contain embedding_matrix")
     if embedding_matrix.ndim != 2:
         raise ValueError(f"cell-type LLM embedding matrix must be 2D, got {embedding_matrix.shape}")
-    if "cell_type_index" not in artifacts.df.columns:
-        raise KeyError("cell-type LLM features require cell_type_index in feature_table")
+    index_column = str(getattr(args, "cell_type_llm_index_column", "cell_type_index") or "cell_type_index")
+    if index_column not in artifacts.df.columns:
+        raise KeyError(f"cell-type LLM features require {index_column} in feature_table")
     import pandas as pd
 
-    row_indices = pd.to_numeric(artifacts.df["cell_type_index"], errors="coerce").fillna(0).astype(np.int64).to_numpy()
+    row_indices = pd.to_numeric(artifacts.df[index_column], errors="coerce").fillna(0).astype(np.int64).to_numpy()
     if row_indices.min(initial=0) < 0 or row_indices.max(initial=0) >= embedding_matrix.shape[0]:
         raise ValueError(
-            "feature_table cell_type_index exceeds cell-type LLM embedding rows; "
+            f"feature_table {index_column} exceeds cell-type LLM embedding rows; "
             f"max_index={int(row_indices.max(initial=0))} rows={embedding_matrix.shape[0]}"
         )
     row_features = embedding_matrix[row_indices].astype(np.float32, copy=False)
@@ -223,6 +402,7 @@ def load_fast_cell_type_llm_features(
         "enabled": True,
         "feature_dim": int(row_features.shape[1]),
         "embedding_path": str(path.resolve()),
+        "index_column": index_column,
         "embedding_rows": int(embedding_matrix.shape[0]),
         "embedding_model": meta.get("embedding_model"),
         "description_model": meta.get("description_model"),
@@ -339,9 +519,9 @@ def build_fast_target_expression_weights(
     if weight_path.exists() and meta_path.exists() and not bool(getattr(args, "force_target_expression_cache_rebuild", False)):
         meta = load_json(meta_path)
         meta["cache_hit"] = True
-        return np.load(weight_path, mmap_mode="r"), meta
+        return safe_np_load(weight_path, mmap_mode="r"), meta
 
-    pdi = np.load(pdi_matrix_path, mmap_mode="r")
+    pdi = safe_np_load(pdi_matrix_path, mmap_mode="r")
     if pdi.ndim != 2:
         raise ValueError(f"PDI matrix must be 2D; got {pdi.shape}")
     n_drugs, n_proteins = int(pdi.shape[0]), int(pdi.shape[1])
@@ -352,14 +532,14 @@ def build_fast_target_expression_weights(
     ppi = None
     ppi_degree = None
     if mode == "pdi_ppi" and ppi_topk > 0 and ppi_alpha > 0.0:
-        ppi = np.load(ppi_matrix_path, mmap_mode="r")
+        ppi = safe_np_load(ppi_matrix_path, mmap_mode="r")
         if ppi.ndim != 2 or ppi.shape[0] != n_proteins or ppi.shape[1] <= int(ordered[valid_gene].max(initial=0)):
             raise ValueError(f"PPI matrix shape {ppi.shape} is incompatible with PDI proteins and expression axis")
         if ppi_norm != "raw" or degree_penalty > 0.0:
             ppi_degree = np.asarray(ppi, dtype=np.float32).sum(axis=1)
             ppi_degree = np.nan_to_num(ppi_degree, nan=0.0, posinf=0.0, neginf=0.0)
     elif degree_penalty > 0.0:
-        ppi = np.load(ppi_matrix_path, mmap_mode="r")
+        ppi = safe_np_load(ppi_matrix_path, mmap_mode="r")
         if ppi.ndim != 2 or ppi.shape[1] <= int(ordered[valid_gene].max(initial=0)):
             raise ValueError(f"PPI matrix shape {ppi.shape} is incompatible with expression axis")
         ppi_degree = np.asarray(ppi, dtype=np.float32).sum(axis=1)
@@ -465,7 +645,7 @@ def build_fast_target_expression_weights(
         "degree_penalty": float(degree_penalty),
     }
     dump_json(meta_path, json_safe(meta))
-    return np.load(weight_path, mmap_mode="r"), meta
+    return safe_np_load(weight_path, mmap_mode="r"), meta
 
 
 def parse_limit_batches(value: str) -> int | float:
@@ -697,7 +877,14 @@ def build_data_loaders(args, artifacts: TrainingReadyArtifacts, drug_embedding: 
     }
 
 
-def fast_split_counts(artifacts: FastTrainingReadyArtifacts, indices: list[int], label_key: str) -> dict[str, Any]:
+def fast_split_counts(
+    artifacts: FastTrainingReadyArtifacts,
+    indices: list[int],
+    label_key: str,
+    *,
+    task_head: str = "response",
+    response_label_key: str | None = None,
+) -> dict[str, Any]:
     subset = artifacts.df.iloc[indices]
     result: dict[str, Any] = {"count": len(indices)}
     if "pert_id1" in subset.columns:
@@ -706,6 +893,26 @@ def fast_split_counts(artifacts: FastTrainingReadyArtifacts, indices: list[int],
         result["cell_unique"] = int(subset["Cell"].nunique(dropna=True))
     if label_key in subset.columns:
         result["label_counts"] = subset[label_key].astype("string").fillna("<NA>").value_counts(dropna=False).to_dict()
+    if task_head == "unified" and response_label_key and response_label_key in subset.columns:
+        result["response_label_counts"] = (
+            subset[response_label_key].astype("string").fillna("<NA>").value_counts(dropna=False).to_dict()
+        )
+    if task_head == "unified":
+        active = [
+            fast_active_label_from_row(
+                artifacts.df,
+                int(row_idx),
+                label_key=label_key,
+                task_head=task_head,
+                response_label_key=response_label_key,
+            )
+            for row_idx in indices
+        ]
+        active_labels = [label for label, mask in active if mask < 0.5]
+        result["unified_active_label_count"] = len(active_labels)
+        result["unified_inactive_label_count"] = len(indices) - len(active_labels)
+        result["unified_positive_count"] = int(sum(1 for label in active_labels if label >= 0.5))
+        result["unified_negative_count"] = int(sum(1 for label in active_labels if label < 0.5))
     return result
 
 
@@ -715,22 +922,28 @@ def fast_active_label_sampler(
     indices: list[int],
     label_key: str,
     task_head: str,
+    response_label_key: str | None = None,
     active_weight: float,
     positive_weight: float,
     num_samples: int,
 ) -> WeightedRandomSampler | None:
     if active_weight <= 1.0 and positive_weight <= 1.0:
         return None
-    if label_key not in artifacts.df.columns:
+    if label_key not in artifacts.df.columns and task_head != "unified":
         return None
-    encoder = encode_synergy_label if task_head == "synergy" else encode_response_label
     weights: list[float] = []
     active_count = 0
     inactive_count = 0
     positive_count = 0
     negative_count = 0
     for row_idx in indices:
-        label, mask = encoder(artifacts.df.at[int(row_idx), label_key])
+        label, mask = fast_active_label_from_row(
+            artifacts.df,
+            int(row_idx),
+            label_key=label_key,
+            task_head=task_head,
+            response_label_key=response_label_key,
+        )
         if mask < 0.5:
             active_count += 1
             if label >= 0.5:
@@ -759,22 +972,28 @@ def filter_train_indices_by_inactive_label_ratio(
     indices: list[int],
     label_key: str,
     task_head: str,
+    response_label_key: str | None = None,
     max_inactive_ratio: float,
     seed: int,
 ) -> tuple[list[int], dict[str, Any]]:
     if max_inactive_ratio < 0:
         return indices, {"enabled": False, "max_inactive_ratio": max_inactive_ratio}
-    if label_key not in artifacts.df.columns:
+    if label_key not in artifacts.df.columns and task_head != "unified":
         return indices, {
             "enabled": False,
             "max_inactive_ratio": max_inactive_ratio,
             "reason": f"missing label column {label_key!r}",
         }
-    encoder = encode_synergy_label if task_head == "synergy" else encode_response_label
     active: list[int] = []
     inactive: list[int] = []
     for row_idx in indices:
-        _, mask = encoder(artifacts.df.at[int(row_idx), label_key])
+        _, mask = fast_active_label_from_row(
+            artifacts.df,
+            int(row_idx),
+            label_key=label_key,
+            task_head=task_head,
+            response_label_key=response_label_key,
+        )
         if mask < 0.5:
             active.append(int(row_idx))
         else:
@@ -823,6 +1042,7 @@ def build_fast_data_loaders(
         indices=train_indices,
         label_key=args.task_label_key,
         task_head=args.task_head,
+        response_label_key=args.effective_key1,
         max_inactive_ratio=args.inactive_label_train_ratio,
         seed=args.seed,
     )
@@ -845,11 +1065,17 @@ def build_fast_data_loaders(
         valid_set_info=valid_set_info,
         test_set_info=test_set_info,
     )
-    cell_type_feature_matrix, cell_type_llm_summary = load_fast_cell_type_llm_features(
+    cell_type_feature_matrix, cell_llm_summary = load_fast_cell_llm_features(
         args=args,
         artifacts=artifacts,
         training_ready_root=Path(args.training_ready_root),
     )
+    cell_type_llm_feature_matrix, cell_type_llm_summary = load_fast_cell_type_llm_features(
+        args=args,
+        artifacts=artifacts,
+        training_ready_root=Path(args.training_ready_root),
+    )
+    random_control_expression_matrix, control_expression_summary = load_random_control_expression_matrix(args, artifacts)
     dataset_kwargs = {
         "artifacts": artifacts,
         "drug_embedding_matrix": drug_embedding,
@@ -865,6 +1091,9 @@ def build_fast_data_loaders(
         "covariate_unk_dropout": args.covariate_unk_dropout,
         "prior_feature_matrix": prior_feature_matrix,
         "cell_type_feature_matrix": cell_type_feature_matrix,
+        "cell_type_llm_feature_matrix": cell_type_llm_feature_matrix,
+        "control_expression_mode": args.control_expression_mode,
+        "random_control_expression_matrix": random_control_expression_matrix,
     }
     train_dataset = FastProteinTalkDataset(
         indices=train_indices,
@@ -898,6 +1127,7 @@ def build_fast_data_loaders(
         indices=train_indices,
         label_key=args.task_label_key,
         task_head=args.task_head,
+        response_label_key=args.effective_key1,
         active_weight=args.active_label_sampling_weight,
         positive_weight=args.positive_label_sampling_weight,
         num_samples=len(train_dataset),
@@ -916,10 +1146,34 @@ def build_fast_data_loaders(
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, **loader_kwargs)
     split_summary = {
         "split_dir": str(split_dir.resolve()),
-        "raw_train": fast_split_counts(artifacts, raw_train_indices, args.task_label_key),
-        "train": fast_split_counts(artifacts, train_indices, args.task_label_key),
-        "valid": fast_split_counts(artifacts, valid_indices, args.task_label_key),
-        "test": fast_split_counts(artifacts, test_indices, args.task_label_key),
+        "raw_train": fast_split_counts(
+            artifacts,
+            raw_train_indices,
+            args.task_label_key,
+            task_head=args.task_head,
+            response_label_key=args.effective_key1,
+        ),
+        "train": fast_split_counts(
+            artifacts,
+            train_indices,
+            args.task_label_key,
+            task_head=args.task_head,
+            response_label_key=args.effective_key1,
+        ),
+        "valid": fast_split_counts(
+            artifacts,
+            valid_indices,
+            args.task_label_key,
+            task_head=args.task_head,
+            response_label_key=args.effective_key1,
+        ),
+        "test": fast_split_counts(
+            artifacts,
+            test_indices,
+            args.task_label_key,
+            task_head=args.task_head,
+            response_label_key=args.effective_key1,
+        ),
         "train_filter": train_filter_summary,
         "train_valid_overlap": len(set(train_indices) & set(valid_indices)),
         "train_test_overlap": len(set(train_indices) & set(test_indices)),
@@ -931,7 +1185,9 @@ def build_fast_data_loaders(
         "covariate_unk_fields": list(covariate_unknown_indices),
         "covariate_unk_dropout": args.covariate_unk_dropout,
         "cell_prior": prior_summary,
+        "cell_llm": cell_llm_summary,
         "cell_type_llm": cell_type_llm_summary,
+        "control_expression": control_expression_summary,
     }
     return train_loader, valid_loader, test_loader, split_summary, train_indices
 
@@ -1102,11 +1358,12 @@ def build_fast_cell_prior_features(
     if mode != "knn_drug":
         raise ValueError(f"unsupported cell_prior_mode: {mode!r}")
     required_columns = {"Cell_index", "pert_index1", args.task_label_key}
+    if args.task_head == "unified":
+        required_columns.add(args.effective_key1)
     missing_columns = sorted(required_columns - set(artifacts.df.columns))
     if missing_columns:
         raise ValueError(f"cell prior requires missing feature_table columns: {missing_columns}")
 
-    encoder = encode_synergy_label if args.task_head == "synergy" else encode_response_label
     control_rows = _control_row_lookup(
         row_to_set=row_to_set,
         set_infos=[train_set_info, valid_set_info, test_set_info],
@@ -1143,7 +1400,13 @@ def build_fast_cell_prior_features(
     total_positive = 0.0
     total_count = 0
     for row_idx in train_indices:
-        label, mask = encoder(artifacts.df.at[int(row_idx), args.task_label_key])
+        label, mask = fast_active_label_from_row(
+            artifacts.df,
+            int(row_idx),
+            label_key=args.task_label_key,
+            task_head=args.task_head,
+            response_label_key=args.effective_key1,
+        )
         if mask >= 0.5:
             continue
         drug_index = int(artifacts.df.at[int(row_idx), "pert_index1"])
@@ -1266,7 +1529,7 @@ def build_fast_mse_gene_weights(
         selected[top_indices] = True
         selected_counts["variance"] = int(top_indices.shape[0])
     if mode in {"pdi", "variance_pdi"}:
-        pdi_matrix = np.load(pdi_matrix_path, mmap_mode="r")
+        pdi_matrix = safe_np_load(pdi_matrix_path, mmap_mode="r")
         if "pert_index1" not in artifacts.df.columns:
             raise ValueError("PDI gene weighting requires pert_index1 in feature_table")
         train_drugs = np.unique(pd_to_int_array(artifacts.df.iloc[train_indices]["pert_index1"]))
@@ -1371,6 +1634,26 @@ def resolve_fast_positive_weight(
     if text in {"", "none", "null", "0"}:
         return None
     if text == "auto":
+        if args.task_head == "unified":
+            positives = 0
+            negatives = 0
+            for row_idx in train_indices:
+                label, mask = fast_active_label_from_row(
+                    artifacts.df,
+                    int(row_idx),
+                    label_key=args.task_label_key,
+                    task_head=args.task_head,
+                    response_label_key=args.effective_key1,
+                )
+                if mask >= 0.5:
+                    continue
+                if label >= 0.5:
+                    positives += 1
+                else:
+                    negatives += 1
+            if positives == 0 or negatives == 0:
+                return None
+            return float(min(args.max_positive_weight, max(1.0, negatives / positives)))
         return compute_positive_weight(
             df=artifacts.df,
             indices=train_indices,
@@ -1476,7 +1759,7 @@ def run_fast_training(args: argparse.Namespace) -> None:
             include_multihop=args.graph_multihop,
             force_rebuild=args.force_graph_cache_rebuild,
         )
-    ddi_matrix = np.load(ddi_matrix_path, mmap_mode="r") if args.use_ddi else None
+    ddi_matrix = safe_np_load(ddi_matrix_path, mmap_mode="r") if args.use_ddi else None
     train_loader, valid_loader, test_loader, split_summary, train_indices = build_fast_data_loaders(
         args,
         artifacts,
@@ -1511,8 +1794,10 @@ def run_fast_training(args: argparse.Namespace) -> None:
         ppi_matrix_path=ppi_matrix_path,
     )
     prior_feature_dim = int(split_summary.get("cell_prior", {}).get("feature_dim", 0))
-    cell_type_feature_dim = int(split_summary.get("cell_type_llm", {}).get("feature_dim", 0))
-    args.cell_type_llm_feature_dim = cell_type_feature_dim
+    cell_type_feature_dim = int(split_summary.get("cell_llm", {}).get("feature_dim", 0))
+    cell_type_llm_feature_dim = int(split_summary.get("cell_type_llm", {}).get("feature_dim", 0))
+    args.cell_llm_feature_dim = cell_type_feature_dim
+    args.cell_type_llm_feature_dim = cell_type_llm_feature_dim
 
     model = FastDeltaDrugResponseModel(
         n_genes=int(artifacts.expression_matrix.shape[1]),
@@ -1568,8 +1853,29 @@ def run_fast_training(args: argparse.Namespace) -> None:
         response_delta_detach=args.response_delta_detach,
         delta_logit_scale=args.delta_logit_scale,
         delta_logit_learnable=args.delta_logit_learnable,
+        response_trajectory_mode=args.response_trajectory_mode,
+        response_trajectory_dim=args.response_trajectory_dim,
+        response_trajectory_seed=args.response_trajectory_seed,
+        response_trajectory_detach=args.response_trajectory_detach,
+        trajectory_logit_scale=args.trajectory_logit_scale,
+        trajectory_logit_learnable=args.trajectory_logit_learnable,
         aux_covariate_sizes=aux_covariate_sizes,
         cell_type_feature_dim=cell_type_feature_dim,
+        cell_type_fusion_mode=args.cell_llm_fusion_mode,
+        cell_type_condition_scale=args.cell_llm_condition_scale,
+        cell_type_logit_scale=args.cell_llm_logit_scale,
+        cell_type_dropout=args.cell_llm_dropout,
+        cell_type_llm_feature_dim=cell_type_llm_feature_dim,
+        cell_type_llm_fusion_mode=args.cell_type_llm_fusion_mode,
+        cell_type_llm_condition_scale=args.cell_type_llm_condition_scale,
+        cell_type_llm_logit_scale=args.cell_type_llm_logit_scale,
+        cell_type_llm_dropout=args.cell_type_llm_dropout,
+        control_drug_interaction_mode=args.control_drug_interaction_mode,
+        control_drug_interaction_scale=args.control_drug_interaction_scale,
+        control_drug_logit_scale=args.control_drug_logit_scale,
+        observed_perturb_expression_mode=args.observed_perturb_expression_mode,
+        observed_perturb_expression_scale=args.observed_perturb_expression_scale,
+        observed_perturb_logit_scale=args.observed_perturb_logit_scale,
         prior_feature_dim=prior_feature_dim,
         prior_logit_scale=args.cell_prior_logit_scale,
         prior_fixed_logit_scale=args.cell_prior_fixed_logit_scale,
@@ -1609,9 +1915,14 @@ def run_fast_training(args: argparse.Namespace) -> None:
         aux_covariate_contrastive_weight=args.aux_covariate_contrastive_weight,
         aux_covariate_contrastive_indices=aux_covariate_contrastive_indices,
         aux_covariate_contrastive_temperature=args.aux_covariate_contrastive_temperature,
+        focal_loss=args.focal_loss,
+        focal_gamma=args.focal_gamma,
+        focal_alpha=args.focal_alpha,
         ranking_loss_weight=args.ranking_loss_weight,
         ranking_loss_margin=args.ranking_loss_margin,
         ranking_loss_group_index=ranking_loss_group_index,
+        ranking_loss_hard_negatives=args.ranking_loss_hard_negatives,
+        ranking_loss_hard_positives=args.ranking_loss_hard_positives,
         delta_teacher_loss_weight=args.delta_teacher_loss_weight,
     )
     load_model_state(lightning_model, args.checkpoint_path, strict=not args.allow_partial_checkpoint_load)
@@ -1624,6 +1935,7 @@ def run_fast_training(args: argparse.Namespace) -> None:
         "experiment_name": experiment_name,
         "implementation": "fast_delta",
         "dataset_group": args.dataset_group,
+        "training_ready_root": str(training_ready_root.resolve()),
         "task_name": args.task_name,
         "split_strategy": args.split_strategy,
         "model_type": FAST_DELTA_MODEL_NAME,
@@ -1689,6 +2001,12 @@ def run_fast_training(args: argparse.Namespace) -> None:
         "response_delta_detach": args.response_delta_detach,
         "delta_logit_scale": args.delta_logit_scale,
         "delta_logit_learnable": args.delta_logit_learnable,
+        "response_trajectory_mode": args.response_trajectory_mode,
+        "response_trajectory_dim": args.response_trajectory_dim,
+        "response_trajectory_seed": args.response_trajectory_seed,
+        "response_trajectory_detach": args.response_trajectory_detach,
+        "trajectory_logit_scale": args.trajectory_logit_scale,
+        "trajectory_logit_learnable": args.trajectory_logit_learnable,
         "aux_covariate_loss_fields": list(args.aux_covariate_loss_fields),
         "aux_covariate_loss_indices": list(aux_covariate_indices),
         "aux_covariate_loss_weight": args.aux_covariate_loss_weight,
@@ -1697,10 +2015,15 @@ def run_fast_training(args: argparse.Namespace) -> None:
         "aux_covariate_contrastive_indices": list(aux_covariate_contrastive_indices),
         "aux_covariate_contrastive_weight": args.aux_covariate_contrastive_weight,
         "aux_covariate_contrastive_temperature": args.aux_covariate_contrastive_temperature,
+        "focal_loss": args.focal_loss,
+        "focal_gamma": args.focal_gamma,
+        "focal_alpha": args.focal_alpha,
         "ranking_loss_weight": args.ranking_loss_weight,
         "ranking_loss_margin": args.ranking_loss_margin,
         "ranking_loss_group_field": args.ranking_loss_group_field,
         "ranking_loss_group_index": ranking_loss_group_index,
+        "ranking_loss_hard_negatives": args.ranking_loss_hard_negatives,
+        "ranking_loss_hard_positives": args.ranking_loss_hard_positives,
         "delta_teacher_loss_weight": args.delta_teacher_loss_weight,
         "cell_prior_mode": args.cell_prior_mode,
         "cell_prior_feature_dim": prior_feature_dim,
@@ -1708,10 +2031,28 @@ def run_fast_training(args: argparse.Namespace) -> None:
         "cell_prior_temperature": args.cell_prior_temperature,
         "cell_prior_logit_scale": args.cell_prior_logit_scale,
         "cell_prior_fixed_logit_scale": args.cell_prior_fixed_logit_scale,
+        "cell_llm_mode": args.cell_llm_mode,
+        "cell_llm_fusion_mode": args.cell_llm_fusion_mode,
+        "cell_llm_condition_scale": args.cell_llm_condition_scale,
+        "cell_llm_logit_scale": args.cell_llm_logit_scale,
+        "cell_llm_dropout": args.cell_llm_dropout,
+        "cell_llm_feature_dim": cell_type_feature_dim,
+        "cell_llm_embedding_path": args.cell_llm_embedding_path_resolved,
+        "cell_llm_summary": json_safe(split_summary.get("cell_llm", {})),
         "cell_type_llm_mode": args.cell_type_llm_mode,
-        "cell_type_llm_feature_dim": cell_type_feature_dim,
+        "cell_type_llm_fusion_mode": args.cell_type_llm_fusion_mode,
+        "cell_type_llm_condition_scale": args.cell_type_llm_condition_scale,
+        "cell_type_llm_logit_scale": args.cell_type_llm_logit_scale,
+        "cell_type_llm_dropout": args.cell_type_llm_dropout,
+        "cell_type_llm_feature_dim": cell_type_llm_feature_dim,
         "cell_type_llm_embedding_path": args.cell_type_llm_embedding_path_resolved,
         "cell_type_llm_summary": json_safe(split_summary.get("cell_type_llm", {})),
+        "control_drug_interaction_mode": args.control_drug_interaction_mode,
+        "control_drug_interaction_scale": args.control_drug_interaction_scale,
+        "control_drug_logit_scale": args.control_drug_logit_scale,
+        "observed_perturb_expression_mode": args.observed_perturb_expression_mode,
+        "observed_perturb_expression_scale": args.observed_perturb_expression_scale,
+        "observed_perturb_logit_scale": args.observed_perturb_logit_scale,
         "mse_gene_weight_summary": mse_gene_weight_summary,
         "mse_target_mode": args.mse_target_mode,
         "mse_target_topk": args.mse_target_topk,
@@ -1730,6 +2071,9 @@ def run_fast_training(args: argparse.Namespace) -> None:
         "task_head": task_loss_config["task_head"],
         "task_label_key": task_loss_config["task_label_key"],
         "task_mask_key": task_loss_config["task_mask_key"],
+        "task_label_policy": (
+            "unified_synergy_first_else_response" if task_loss_config["task_head"] == "unified" else "single_head"
+        ),
         "batch_cov_list": args.batch_cov_list,
         "use_dose_covariate": bool(args.use_dose_covariate),
         "dose_covariate_fields": list(args.dose_covariate_fields),
@@ -1789,6 +2133,9 @@ def run_fast_training(args: argparse.Namespace) -> None:
         "init_delta_scale": args.init_delta_scale,
         "zero_init_delta_head": args.zero_init_delta_head,
         "control_expression_dropout": args.control_expression_dropout,
+        "control_expression_mode": args.control_expression_mode,
+        "random_control_expression_path": getattr(args, "random_control_expression_path_resolved", None),
+        "random_control_expression_summary": json_safe(split_summary.get("control_expression", {})),
         "save_top_k": args.save_top_k,
         "save_last_ckpt": args.save_last_ckpt,
         "logger_backend": "wandb" if args.log_to_wandb else args.logger_backend,
@@ -2008,6 +2355,8 @@ def main() -> None:
     parser.add_argument("--positive-weight2", type=float, default=None)
     parser.add_argument("--max-positive-weight", type=float, default=20.0)
     parser.add_argument("--focal-loss", "--focal_loss", action="store_true", dest="focal_loss")
+    parser.add_argument("--focal-gamma", type=float, default=2.0)
+    parser.add_argument("--focal-alpha", type=float, default=0.0)
     parser.add_argument("--scheduler-name", "--scheduler_name", choices=["cosine", "step", "plateau", "cosine_warmup", "none"], default="cosine")
     parser.add_argument("--fusion-mode", choices=["concat", "add"], default="concat")
     parser.add_argument("--perturb-fusion-mode", choices=["add", "concat", "mlp"], default="add")
@@ -2043,7 +2392,7 @@ def main() -> None:
     parser.add_argument("--gene-emb-dim", type=int, default=768)
     parser.add_argument("--effective-key1", default=None)
     parser.add_argument("--effective-key2", default="synergy")
-    parser.add_argument("--task-head", choices=["auto", "response", "synergy"], default="auto")
+    parser.add_argument("--task-head", choices=["auto", "response", "synergy", "unified"], default="auto")
     parser.add_argument("--task-label-key", default=None)
     parser.add_argument("--task-mask-key", default=None)
     parser.add_argument(
@@ -2165,6 +2514,17 @@ def main() -> None:
     parser.add_argument("--delta-logit-scale", type=float, default=0.0)
     parser.add_argument("--delta-logit-learnable", action="store_true")
     parser.add_argument(
+        "--response-trajectory-mode",
+        choices=["off", "summary", "drug", "gate"],
+        default="off",
+        help="Add a PTV1-flow-like expression trajectory response branch using control, predicted perturb, and delta.",
+    )
+    parser.add_argument("--response-trajectory-dim", type=int, default=64)
+    parser.add_argument("--response-trajectory-seed", type=int, default=37)
+    parser.add_argument("--response-trajectory-detach", action="store_true")
+    parser.add_argument("--trajectory-logit-scale", type=float, default=0.0)
+    parser.add_argument("--trajectory-logit-learnable", action="store_true")
+    parser.add_argument(
         "--aux-covariate-loss-fields",
         nargs="*",
         default=[],
@@ -2183,6 +2543,8 @@ def main() -> None:
     parser.add_argument("--ranking-loss-weight", type=float, default=0.0)
     parser.add_argument("--ranking-loss-margin", type=float, default=0.0)
     parser.add_argument("--ranking-loss-group-field", default="Cell")
+    parser.add_argument("--ranking-loss-hard-negatives", type=int, default=0)
+    parser.add_argument("--ranking-loss-hard-positives", type=int, default=0)
     parser.add_argument(
         "--delta-teacher-loss-weight",
         type=float,
@@ -2196,6 +2558,31 @@ def main() -> None:
     parser.add_argument("--cell-prior-logit-scale", type=float, default=0.0)
     parser.add_argument("--cell-prior-fixed-logit-scale", type=float, default=0.0)
     parser.add_argument(
+        "--cell-llm-mode",
+        choices=["off", "frozen"],
+        default="off",
+        help="Use frozen LLM-derived Cell text embeddings as continuous covariates.",
+    )
+    parser.add_argument(
+        "--cell-llm-embedding-path",
+        default=None,
+        help="Path to Cell LLM embedding .npz; defaults to the dataset group's generated artifact.",
+    )
+    parser.add_argument(
+        "--cell-llm-index-column",
+        default="Cell_index",
+        help="Feature-table column used to index rows in the Cell LLM embedding artifact.",
+    )
+    parser.add_argument(
+        "--cell-llm-fusion-mode",
+        choices=["off", "covariate", "piece", "film", "interaction", "hybrid"],
+        default="covariate",
+        help="How frozen Cell LLM features condition the fast model.",
+    )
+    parser.add_argument("--cell-llm-condition-scale", type=float, default=0.0)
+    parser.add_argument("--cell-llm-logit-scale", type=float, default=0.0)
+    parser.add_argument("--cell-llm-dropout", type=float, default=0.0)
+    parser.add_argument(
         "--cell-type-llm-mode",
         choices=["off", "frozen"],
         default="off",
@@ -2204,8 +2591,28 @@ def main() -> None:
     parser.add_argument(
         "--cell-type-llm-embedding-path",
         default=None,
-        help="Path to cell_type LLM embedding .npz; defaults to data/training_ready/<group>/derived/cell_type_llm_embedding_qwen3_4096.npz.",
+        help="Path to cell_type LLM embedding .npz; defaults to the group derived artifact (PTV1 v3, others v2).",
     )
+    parser.add_argument(
+        "--cell-type-llm-index-column",
+        default="cell_type_index",
+        help="Feature-table column used to index rows in the cell_type LLM embedding artifact.",
+    )
+    parser.add_argument(
+        "--cell-type-llm-fusion-mode",
+        choices=["off", "covariate", "piece", "film", "interaction", "hybrid"],
+        default="covariate",
+        help="How frozen cell_type LLM features condition the fast model.",
+    )
+    parser.add_argument("--cell-type-llm-condition-scale", type=float, default=0.0)
+    parser.add_argument("--cell-type-llm-logit-scale", type=float, default=0.0)
+    parser.add_argument("--cell-type-llm-dropout", type=float, default=0.0)
+    parser.add_argument("--control-drug-interaction-mode", choices=["off", "full"], default="off")
+    parser.add_argument("--control-drug-interaction-scale", type=float, default=0.0)
+    parser.add_argument("--control-drug-logit-scale", type=float, default=0.0)
+    parser.add_argument("--observed-perturb-expression-mode", choices=["off", "perturb", "delta"], default="off")
+    parser.add_argument("--observed-perturb-expression-scale", type=float, default=0.0)
+    parser.add_argument("--observed-perturb-logit-scale", type=float, default=0.0)
     parser.add_argument("--use-ddi", action="store_true")
     parser.add_argument("--absolute-expression-head", action="store_false", dest="residual_expression")
     parser.add_argument("--init-delta-scale", type=float, default=0.1)
@@ -2219,6 +2626,17 @@ def main() -> None:
         type=float,
         default=0.0,
         help="Training-only inverted dropout on the control expression input.",
+    )
+    parser.add_argument(
+        "--control-expression-mode",
+        choices=["real", "random_saved"],
+        default="real",
+        help="Use the paired real control row or a saved random control proteome aligned by feature row index.",
+    )
+    parser.add_argument(
+        "--random-control-expression-path",
+        default=None,
+        help="Path to random_control_expression_seed*.npy when --control-expression-mode random_saved is used.",
     )
     parser.add_argument("--log-dir", default="logs")
     parser.add_argument("--checkpoint-dir", default="checkpoints")
@@ -2301,6 +2719,8 @@ def main() -> None:
     if args.model_type == FAST_DELTA_MODEL_NAME:
         run_fast_training(args)
         return
+    if args.control_expression_mode != "real":
+        raise ValueError("--control-expression-mode random_saved is only supported with --model-type fast_delta")
     checkpoint_selection = resolve_checkpoint_selection(args)
     scheduler_monitor, scheduler_monitor_mode = resolve_scheduler_monitor(checkpoint_selection)
 
@@ -2327,6 +2747,8 @@ def main() -> None:
         task_label_key=args.task_label_key,
         task_mask_key=args.task_mask_key,
     )
+    if task_loss_config["task_head"] == "unified":
+        raise ValueError("--task-head unified is only supported with --model-type fast_delta")
     args.task_head = task_loss_config["task_head"]
     args.task_label_key = task_loss_config["task_label_key"]
     args.task_mask_key = task_loss_config["task_mask_key"]
@@ -2397,6 +2819,7 @@ def main() -> None:
         "run_status": "fit_started",
         "experiment_name": experiment_name,
         "dataset_group": args.dataset_group,
+        "training_ready_root": str(training_ready_root.resolve()),
         "task_name": args.task_name,
         "split_strategy": args.split_strategy,
         "model_type": args.model_type,
@@ -2413,6 +2836,9 @@ def main() -> None:
         "task_head": task_loss_config["task_head"],
         "task_label_key": task_loss_config["task_label_key"],
         "task_mask_key": task_loss_config["task_mask_key"],
+        "task_label_policy": (
+            "unified_synergy_first_else_response" if task_loss_config["task_head"] == "unified" else "single_head"
+        ),
         "batch_cov_list": args.batch_cov_list,
         "use_dose_covariate": bool(args.use_dose_covariate),
         "dose_covariate_fields": list(args.dose_covariate_fields),

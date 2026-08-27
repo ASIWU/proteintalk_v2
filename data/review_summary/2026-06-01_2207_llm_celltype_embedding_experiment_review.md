@@ -32,8 +32,8 @@
 - Full run prefix: `20260601_llm_celltype_full_v1`.
 - Final report:
   - `logs/20260601_llm_celltype_full_v1_cell_drug_dose_time_eval.md`
-  - `outputs/20260601_llm_celltype_full_v1_cell_drug_dose_time_eval.csv`
-  - `outputs/20260601_llm_celltype_full_v1_cell_drug_dose_time_eval.json`
+  - `outputs/2026-06/2026-06-01/20260601_llm_celltype_full_v1_cell_drug_dose_time_eval.csv`
+  - `outputs/2026-06/2026-06-01/20260601_llm_celltype_full_v1_cell_drug_dose_time_eval.json`
 - Result document: `docs/2026-06-01_llm_celltype_embedding_experiment_results.md`
 
 ## Validation

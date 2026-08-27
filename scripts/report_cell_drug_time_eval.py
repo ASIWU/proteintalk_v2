@@ -128,10 +128,35 @@ INFER_VALUE_ARGS = {
     "response_delta_dim": "--response-delta-dim",
     "response_delta_seed": "--response-delta-seed",
     "delta_logit_scale": "--delta-logit-scale",
+    "response_trajectory_mode": "--response-trajectory-mode",
+    "response_trajectory_dim": "--response-trajectory-dim",
+    "response_trajectory_seed": "--response-trajectory-seed",
+    "trajectory_logit_scale": "--trajectory-logit-scale",
     "control_expression_dropout": "--control-expression-dropout",
     "init_delta_scale": "--init-delta-scale",
+    "cell_llm_mode": "--cell-llm-mode",
+    "cell_llm_embedding_path": "--cell-llm-embedding-path",
+    "cell_llm_fusion_mode": "--cell-llm-fusion-mode",
+    "cell_llm_condition_scale": "--cell-llm-condition-scale",
+    "cell_llm_logit_scale": "--cell-llm-logit-scale",
+    "cell_llm_dropout": "--cell-llm-dropout",
     "cell_type_llm_mode": "--cell-type-llm-mode",
     "cell_type_llm_embedding_path": "--cell-type-llm-embedding-path",
+    "cell_type_llm_fusion_mode": "--cell-type-llm-fusion-mode",
+    "cell_type_llm_condition_scale": "--cell-type-llm-condition-scale",
+    "cell_type_llm_logit_scale": "--cell-type-llm-logit-scale",
+    "cell_type_llm_dropout": "--cell-type-llm-dropout",
+    "control_drug_interaction_mode": "--control-drug-interaction-mode",
+    "control_drug_interaction_scale": "--control-drug-interaction-scale",
+    "control_drug_logit_scale": "--control-drug-logit-scale",
+    "observed_perturb_expression_mode": "--observed-perturb-expression-mode",
+    "observed_perturb_expression_scale": "--observed-perturb-expression-scale",
+    "observed_perturb_logit_scale": "--observed-perturb-logit-scale",
+    "cell_prior_mode": "--cell-prior-mode",
+    "cell_prior_k": "--cell-prior-k",
+    "cell_prior_temperature": "--cell-prior-temperature",
+    "cell_prior_logit_scale": "--cell-prior-logit-scale",
+    "cell_prior_fixed_logit_scale": "--cell-prior-fixed-logit-scale",
 }
 INFER_BOOL_ARGS = {
     "graph_structural_rp": "--graph-structural-rp",
@@ -140,6 +165,8 @@ INFER_BOOL_ARGS = {
     "pair_type_features": "--pair-type-features",
     "response_delta_detach": "--response-delta-detach",
     "delta_logit_learnable": "--delta-logit-learnable",
+    "response_trajectory_detach": "--response-trajectory-detach",
+    "trajectory_logit_learnable": "--trajectory-logit-learnable",
     "use_ddi": "--use-ddi",
     "zero_init_delta_head": "--zero-init-delta-head",
 }
@@ -277,7 +304,9 @@ def enrich_with_feature_metadata(predictions: pd.DataFrame, manifest: dict[str, 
         if column not in feature_rows.columns:
             continue
         values = feature_rows[column].reset_index(drop=True)
-        if column not in result.columns:
+        if column in {"pert_dose1", "pert_dose2", "pert_dose1_norm", "pert_dose2_norm"}:
+            result[column] = values
+        elif column not in result.columns:
             result[column] = values
         else:
             existing = result[column].reset_index(drop=True)
@@ -412,27 +441,47 @@ def collapsed_frame(frame: pd.DataFrame, *, method: str) -> tuple[pd.DataFrame, 
     if method not in {"cell-drug-dose-bylasttime", "cell-drug-dose-avgtime"}:
         raise ValueError(f"unexpected collapsed method: {method}")
     group_cols = ["_cell", "_drug_a", "_dose_a", "_drug_b", "_dose_b"]
-    records: list[dict[str, float]] = []
-    conflict_count = 0
+
+    prob = pd.to_numeric(frame["_prob"], errors="coerce")
+    label = pd.to_numeric(frame["_label"], errors="coerce")
+    time = pd.to_numeric(frame["_time"], errors="coerce")
+    valid_mask = prob.notna() & label.notna()
+    if not bool(valid_mask.any()):
+        return pd.DataFrame(columns=["_label", "_prob"]), 0, 0
+
+    valid = frame.loc[valid_mask, group_cols].copy()
+    valid["_prob"] = prob.loc[valid_mask].astype(float)
+    valid["_label"] = label.loc[valid_mask].astype(float)
+    valid["_time"] = time.loc[valid_mask].astype(float)
+    valid["_group_id"] = valid.groupby(group_cols, dropna=False, sort=False).ngroup()
+
+    group_stats = valid.groupby("_group_id", sort=False).agg(
+        _label=("_label", "first"),
+        _label_nunique=("_label", "nunique"),
+    )
+    keep_group_ids = group_stats.index[group_stats["_label_nunique"].eq(1)]
+    conflict_count = int(len(group_stats) - len(keep_group_ids))
+    if len(keep_group_ids) == 0:
+        return pd.DataFrame(columns=["_label", "_prob"]), conflict_count, 0
+
+    kept = valid.loc[valid["_group_id"].isin(keep_group_ids)].copy()
     missing_time_count = 0
-    for _, group in frame.groupby(group_cols, dropna=False, sort=False):
-        finite_prob = group[np.isfinite(group["_prob"].astype(float)) & group["_label"].notna()].copy()
-        if finite_prob.empty:
-            continue
-        labels = sorted({float(value) for value in finite_prob["_label"].dropna().tolist()})
-        if len(labels) != 1:
-            conflict_count += 1
-            continue
-        selected = finite_prob
-        if method == "cell-drug-dose-bylasttime":
-            finite_time = selected[np.isfinite(selected["_time"].astype(float))]
-            if finite_time.empty:
-                missing_time_count += 1
-            else:
-                max_time = float(finite_time["_time"].max())
-                selected = selected[selected["_time"].eq(max_time)]
-        records.append({"_label": labels[0], "_prob": float(selected["_prob"].mean())})
-    return pd.DataFrame.from_records(records), conflict_count, missing_time_count
+    if method == "cell-drug-dose-bylasttime":
+        kept["_finite_time"] = np.isfinite(kept["_time"])
+        time_stats = kept.groupby("_group_id", sort=False).agg(
+            _finite_time_count=("_finite_time", "sum"),
+            _max_time=("_time", "max"),
+        )
+        missing_time_count = int(time_stats["_finite_time_count"].eq(0).sum())
+        kept = kept.join(time_stats, on="_group_id")
+        select_mask = kept["_finite_time_count"].eq(0) | kept["_time"].eq(kept["_max_time"])
+        kept = kept.loc[select_mask]
+
+    result = kept.groupby("_group_id", sort=False).agg(
+        _label=("_label", "first"),
+        _prob=("_prob", "mean"),
+    )
+    return result.reset_index(drop=True), conflict_count, missing_time_count
 
 
 def evaluate_prediction_frame(

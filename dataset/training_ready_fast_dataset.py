@@ -18,6 +18,8 @@ import numpy as np
 import pandas as pd
 from torch.utils.data import Dataset
 
+from utils.npy_io import safe_np_load
+
 
 BATCH_COVARIATE_COLUMNS = {
     "machineID_new": "machineID_new_index",
@@ -214,6 +216,7 @@ class FastTrainingReadyArtifacts:
     meta_path: Path
     df: pd.DataFrame
     expression_matrix: np.ndarray
+    expression_row_indices: np.ndarray
     ordered_protein_index: list[int]
     sample_ids: list[str]
     meta: dict[str, Any]
@@ -226,19 +229,62 @@ class FastTrainingReadyArtifacts:
         if not expression_path.exists():
             raise FileNotFoundError(f"missing expression matrix: {expression_path}")
         df = load_feature_table(task_dir)
-        expression_matrix = np.load(expression_path, mmap_mode="r")
+        expression_matrix = safe_np_load(expression_path, mmap_mode="r")
         ordered_protein_index = [int(item) for item in load_json(task_dir / "feature_ordered_protein_index.json")]
         sample_ids = [str(item) for item in load_json(task_dir / "feature_sample_ids.json")]
         meta = load_json(meta_path)
-        if len(df) != expression_matrix.shape[0]:
-            raise ValueError(
-                f"{task_dir}: feature_table rows {len(df)} != expression rows {expression_matrix.shape[0]}"
-            )
+        if "expression_row_index" in df.columns:
+            raw_expression_row_indices = pd.to_numeric(df["expression_row_index"], errors="coerce")
+            if raw_expression_row_indices.isna().any():
+                bad_rows = raw_expression_row_indices.index[raw_expression_row_indices.isna()].tolist()
+                raise ValueError(
+                    f"{task_dir}: expression_row_index contains missing or non-numeric values "
+                    f"at feature rows {bad_rows[:10]}"
+                )
+            numeric_expression_row_indices = raw_expression_row_indices.to_numpy(dtype=np.float64)
+            if not np.isfinite(numeric_expression_row_indices).all():
+                bad_rows = np.flatnonzero(~np.isfinite(numeric_expression_row_indices)).tolist()
+                raise ValueError(
+                    f"{task_dir}: expression_row_index contains non-finite values "
+                    f"at feature rows {bad_rows[:10]}"
+                )
+            integer_mask = numeric_expression_row_indices == np.floor(numeric_expression_row_indices)
+            if not integer_mask.all():
+                bad_rows = np.flatnonzero(~integer_mask).tolist()
+                raise ValueError(
+                    f"{task_dir}: expression_row_index contains non-integer values "
+                    f"at feature rows {bad_rows[:10]}"
+                )
+            expression_row_indices = numeric_expression_row_indices.astype(np.int64)
+            negative_mask = expression_row_indices < 0
+            if negative_mask.any():
+                bad_rows = np.flatnonzero(negative_mask).tolist()
+                raise ValueError(
+                    f"{task_dir}: expression_row_index contains negative values "
+                    f"at feature rows {bad_rows[:10]}"
+                )
+            overflow_mask = expression_row_indices >= int(expression_matrix.shape[0])
+            if overflow_mask.any():
+                bad_rows = np.flatnonzero(overflow_mask).tolist()
+                bad_values = expression_row_indices[overflow_mask].tolist()
+                raise ValueError(
+                    f"{task_dir}: expression_row_index exceeds expression matrix row count "
+                    f"{expression_matrix.shape[0]} at feature rows {bad_rows[:10]} "
+                    f"with values {bad_values[:10]}"
+                )
+        else:
+            if len(df) != expression_matrix.shape[0]:
+                raise ValueError(
+                    f"{task_dir}: feature_table rows {len(df)} != expression rows "
+                    f"{expression_matrix.shape[0]} and expression_row_index is absent"
+                )
+            expression_row_indices = np.arange(len(df), dtype=np.int64)
         return cls(
             task_dir=task_dir,
             meta_path=meta_path,
             df=df,
             expression_matrix=expression_matrix,
+            expression_row_indices=expression_row_indices,
             ordered_protein_index=ordered_protein_index,
             sample_ids=sample_ids,
             meta=meta,
@@ -271,10 +317,25 @@ class FastProteinTalkDataset(Dataset):
         covariate_unk_dropout: float = 0.0,
         prior_feature_matrix: np.ndarray | None = None,
         cell_type_feature_matrix: np.ndarray | None = None,
+        cell_type_llm_feature_matrix: np.ndarray | None = None,
+        control_expression_mode: str = "real",
+        random_control_expression_matrix: np.ndarray | None = None,
     ) -> None:
         self.artifacts = artifacts
         self.df = artifacts.df
         self.expression_matrix = artifacts.expression_matrix
+        self.control_expression_mode = str(control_expression_mode)
+        if self.control_expression_mode not in {"real", "random_saved"}:
+            raise ValueError("control_expression_mode must be one of: real, random_saved")
+        self.random_control_expression_matrix = random_control_expression_matrix
+        if self.control_expression_mode == "random_saved":
+            if self.random_control_expression_matrix is None:
+                raise ValueError("random_saved control expression mode requires random_control_expression_matrix")
+            if tuple(self.random_control_expression_matrix.shape) != tuple(self.expression_matrix.shape):
+                raise ValueError(
+                    "random_control_expression_matrix shape must match feature expression matrix; "
+                    f"got {self.random_control_expression_matrix.shape} and {self.expression_matrix.shape}"
+                )
         self.indices = [int(idx) for idx in indices]
         self.row_to_set_index = row_to_set_index
         self.set_info = set_info
@@ -315,6 +376,17 @@ class FastProteinTalkDataset(Dataset):
                 "cell_type_feature_matrix row count must match feature table; "
                 f"got {self.cell_type_feature_matrix.shape[0]} and {len(self.df)}"
             )
+        self.cell_type_llm_feature_matrix = (
+            None if cell_type_llm_feature_matrix is None else np.asarray(cell_type_llm_feature_matrix, dtype=np.float32)
+        )
+        self.cell_type_llm_feature_dim = (
+            0 if self.cell_type_llm_feature_matrix is None else int(self.cell_type_llm_feature_matrix.shape[1])
+        )
+        if self.cell_type_llm_feature_matrix is not None and self.cell_type_llm_feature_matrix.shape[0] != len(self.df):
+            raise ValueError(
+                "cell_type_llm_feature_matrix row count must match feature table; "
+                f"got {self.cell_type_llm_feature_matrix.shape[0]} and {len(self.df)}"
+            )
         if self.covariate_unk_dropout < 0.0 or self.covariate_unk_dropout >= 1.0:
             raise ValueError("covariate_unk_dropout must be in [0, 1)")
         self.dataset_len = len(self.indices)
@@ -352,7 +424,7 @@ class FastProteinTalkDataset(Dataset):
     def _format_pair(self, control_row: int, perturb_row: int) -> dict[str, np.ndarray]:
         pert_indices = self._pert_indices[perturb_row]
         output = {
-            "control_expression": self._expression_row(control_row),
+            "control_expression": self._control_expression_row(control_row, perturb_row),
             "perturb_expression": self._expression_row(perturb_row),
             "drug_embeddings": np.asarray(self.drug_embedding_matrix[pert_indices], dtype=np.float32),
             "drug_indices": pert_indices.astype(np.int64, copy=False),
@@ -364,6 +436,7 @@ class FastProteinTalkDataset(Dataset):
             "raw_covariates": self._raw_covariates[perturb_row],
             "prior_features": self._prior_features_for(perturb_row),
             "cell_type_features": self._cell_type_features_for(perturb_row),
+            "cell_type_llm_features": self._cell_type_llm_features_for(perturb_row),
             "ddi_value": np.asarray(self._ddi_values[perturb_row], dtype=np.float32),
             "label1": np.asarray(self._label1[perturb_row], dtype=np.float32),
             "mask1": np.asarray(self._mask1[perturb_row], dtype=np.float32),
@@ -373,8 +446,19 @@ class FastProteinTalkDataset(Dataset):
         }
         return output
 
+    def _control_expression_row(self, control_row: int, perturb_row: int) -> np.ndarray:
+        if self.control_expression_mode == "real":
+            return self._expression_row(control_row)
+        if self.random_control_expression_matrix is None:
+            raise RuntimeError("random control expression matrix is not loaded")
+        return self._expression_row_from_matrix(self.random_control_expression_matrix, perturb_row)
+
     def _expression_row(self, row_idx: int) -> np.ndarray:
-        row = np.asarray(self.expression_matrix[row_idx], dtype=np.float32)
+        expression_row_idx = int(self.artifacts.expression_row_indices[row_idx])
+        return self._expression_row_from_matrix(self.expression_matrix, expression_row_idx)
+
+    def _expression_row_from_matrix(self, matrix: np.ndarray, row_idx: int) -> np.ndarray:
+        row = np.asarray(matrix[row_idx], dtype=np.float32)
         if self.expression_column_index is None:
             return np.array(row, dtype=np.float32, copy=True)
         aligned = np.full(self.expression_column_index.shape[0], np.nan, dtype=np.float32)
@@ -428,6 +512,11 @@ class FastProteinTalkDataset(Dataset):
         if self.cell_type_feature_matrix is None:
             return np.zeros((0,), dtype=np.float32)
         return np.asarray(self.cell_type_feature_matrix[row_idx], dtype=np.float32)
+
+    def _cell_type_llm_features_for(self, row_idx: int) -> np.ndarray:
+        if self.cell_type_llm_feature_matrix is None:
+            return np.zeros((0,), dtype=np.float32)
+        return np.asarray(self.cell_type_llm_feature_matrix[row_idx], dtype=np.float32)
 
     def _build_perturbation_indices(self) -> np.ndarray:
         result = np.zeros((len(self.df), 2), dtype=np.int64)

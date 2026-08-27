@@ -20,3 +20,7 @@ bash scripts/exp_05_single_no_pdi_5fold.sh
 bash scripts/exp_06_double_pert_pair_5fold.sh
 bash scripts/exp_07_extra_single_all_train_infer.sh
 bash scripts/exp_08_extra_double_all_train_infer.sh
+
+export EXP09_EXP01_REFERENCE_PATH="${EXP09_EXP01_REFERENCE_PATH:-${CKPT_DIR:-checkpoints}/${EXP_PREFIX}_single_pert_stratified_fold}"
+export EXP09_EXP06_REFERENCE_PATH="${EXP09_EXP06_REFERENCE_PATH:-${CKPT_DIR:-checkpoints}/${EXP_PREFIX}_double_pert_pair_fold}"
+bash scripts/exp_09_unified_all_train_valid_oracle.sh

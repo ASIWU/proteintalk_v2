@@ -6,8 +6,8 @@ This report reuses the trained checkpoints and prediction files from the selecte
 
 Primary outputs:
 
-- `outputs/20260601_cell_drug_selected_full_v1_cell_drug_dose_time_eval.csv`
-- `outputs/20260601_cell_drug_selected_full_v1_cell_drug_dose_time_eval.json`
+- `outputs/2026-06/2026-06-01/20260601_cell_drug_selected_full_v1_cell_drug_dose_time_eval.csv`
+- `outputs/2026-06/2026-06-01/20260601_cell_drug_selected_full_v1_cell_drug_dose_time_eval.json`
 - `logs/20260601_cell_drug_selected_full_v1_cell_drug_dose_time_eval.md`
 
 Evaluation modes:

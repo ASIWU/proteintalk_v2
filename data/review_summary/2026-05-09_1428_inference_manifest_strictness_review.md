@@ -25,7 +25,7 @@
 - Manifest-backed extra single inference still passed:
   - task: `ptv3_extra_singledrug_mat1_480_faims`
   - checkpoint: `checkpoints/20260509_smoke_all_single_for_extra_2ep/epoch=1.ckpt`
-  - output: `outputs/20260509_manifest_required_extra_single_smoke2/predictions.parquet`
+  - output: `outputs/2026-05/2026-05-09/20260509_manifest_required_extra_single_smoke2/predictions.parquet`
   - rows: `1`
 - Full strategy audit passed.
 - Final GPU process query had no active compute processes.

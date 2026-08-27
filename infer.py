@@ -48,16 +48,22 @@ from train import (
     DEFAULT_BATCH_COVARIATES,
     DEFAULT_DOSE_COVARIATES,
     apply_dose_covariates,
+    build_fast_cell_prior_features,
     build_fast_target_expression_weights,
     category_sizes,
     default_derived_paths,
     graph_feature_blocks_from_meta,
     infer_label_key,
+    load_fast_cell_llm_features,
     load_fast_cell_type_llm_features,
+    load_random_control_expression_matrix,
     load_pdi_matrix,
+    resolve_random_control_expression_path,
     resolve_task_loss_config,
+    resolve_cell_llm_embedding_path,
     resolve_cell_type_llm_embedding_path,
 )
+from utils.npy_io import safe_np_load
 
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -122,6 +128,53 @@ def binary_metrics_with_counts(y_true: np.ndarray, y_prob: np.ndarray, mask: np.
         result["auprc"] = auprc
         result["nauprc"] = auprc / baseline if baseline > 0 else float("nan")
     return result
+
+
+def unified_label_and_mask(
+    true1: np.ndarray,
+    mask1: np.ndarray,
+    true2: np.ndarray,
+    mask2: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    use_synergy = np.asarray(mask2, dtype=np.float32).reshape(-1) < 0.5
+    return (
+        np.where(use_synergy, np.asarray(true2).reshape(-1), np.asarray(true1).reshape(-1)),
+        np.where(use_synergy, np.asarray(mask2).reshape(-1), np.asarray(mask1).reshape(-1)),
+    )
+
+
+def active_prediction_arrays(
+    task_head: str,
+    *,
+    true1: np.ndarray,
+    prob1: np.ndarray,
+    mask1: np.ndarray,
+    true2: np.ndarray,
+    prob2: np.ndarray,
+    mask2: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if task_head == "synergy":
+        return prob2, true2, mask2
+    if task_head == "unified":
+        unified_true, unified_mask = unified_label_and_mask(true1, mask1, true2, mask2)
+        return prob1, unified_true, unified_mask
+    return prob1, true1, mask1
+
+
+def task_label_values(
+    rows: pd.DataFrame,
+    *,
+    task_head: str,
+    task_label_key: str,
+    true1: np.ndarray,
+    mask1: np.ndarray,
+    true2: np.ndarray,
+    mask2: np.ndarray,
+) -> list[object]:
+    if task_head == "unified":
+        unified_true, unified_mask = unified_label_and_mask(true1, mask1, true2, mask2)
+        return [None if float(mask) >= 0.5 else float(label) for label, mask in zip(unified_true, unified_mask, strict=True)]
+    return rows.get(task_label_key, pd.Series([None] * len(rows))).tolist()
 
 
 def test_label_eval_mask(rows: pd.DataFrame) -> pd.Series:
@@ -361,15 +414,143 @@ LEGACY_FAST_MANIFEST_DEFAULTS = {
     "response_delta_detach": False,
     "delta_logit_scale": 0.0,
     "delta_logit_learnable": False,
+    "response_trajectory_mode": "off",
+    "response_trajectory_dim": 64,
+    "response_trajectory_seed": 37,
+    "response_trajectory_detach": False,
+    "trajectory_logit_scale": 0.0,
+    "trajectory_logit_learnable": False,
     "use_ddi": False,
     "residual_expression": True,
     "init_delta_scale": 0.1,
     "zero_init_delta_head": False,
     "control_expression_dropout": 0.0,
+    "control_expression_mode": "real",
+    "random_control_expression_path": None,
+    "cell_llm_mode": "off",
+    "cell_llm_embedding_path": None,
+    "cell_llm_feature_dim": 0,
+    "cell_llm_fusion_mode": "covariate",
+    "cell_llm_condition_scale": 0.0,
+    "cell_llm_logit_scale": 0.0,
+    "cell_llm_dropout": 0.0,
     "cell_type_llm_mode": "off",
     "cell_type_llm_embedding_path": None,
     "cell_type_llm_feature_dim": 0,
+    "cell_type_llm_fusion_mode": "covariate",
+    "cell_type_llm_condition_scale": 0.0,
+    "cell_type_llm_logit_scale": 0.0,
+    "cell_type_llm_dropout": 0.0,
+    "control_drug_interaction_mode": "off",
+    "control_drug_interaction_scale": 0.0,
+    "control_drug_logit_scale": 0.0,
+    "observed_perturb_expression_mode": "off",
+    "observed_perturb_expression_scale": 0.0,
+    "observed_perturb_logit_scale": 0.0,
+    "cell_prior_mode": "off",
+    "cell_prior_k": 8,
+    "cell_prior_temperature": 0.2,
+    "cell_prior_logit_scale": 0.0,
+    "cell_prior_fixed_logit_scale": 0.0,
 }
+
+
+FAST_MODEL_CONFIG_PATH_KEYS = frozenset(
+    {
+        "meta_path",
+        "protein_embedding_path",
+        "drug_embedding_path",
+        "ppi_matrix_path",
+        "pdi_matrix_path",
+        "ddi_matrix_path",
+        "cell_llm_embedding_path",
+        "cell_type_llm_embedding_path",
+        "random_control_expression_path",
+    }
+)
+
+
+def json_safe_config_value(value: object) -> object:
+    """Convert config values to deterministic JSON-compatible primitives."""
+
+    if isinstance(value, np.generic):
+        return json_safe_config_value(value.item())
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): json_safe_config_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_safe_config_value(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        return [json_safe_config_value(item) for item in sorted(value, key=repr)]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return repr(value)
+
+
+def compare_fast_checkpoint_config(
+    current: dict[str, object],
+    checkpoint_manifest: dict[str, object],
+    *,
+    manifest_path: str | Path,
+    manifest_present: bool,
+) -> dict[str, object]:
+    """Return an auditable every-key comparison for fast-model inference."""
+
+    comparisons: list[dict[str, object]] = []
+    normalized_checkpoint_config: dict[str, object] = {}
+    for key, expected in current.items():
+        present = bool(manifest_present and key in checkpoint_manifest)
+        raw_actual = checkpoint_manifest.get(key) if present else None
+        if key in LEGACY_FAST_MANIFEST_DEFAULTS and (not present or raw_actual is None):
+            actual = LEGACY_FAST_MANIFEST_DEFAULTS[key]
+            value_source = "legacy_default_for_missing" if not present else "legacy_default_for_none"
+        else:
+            actual = raw_actual
+            value_source = "manifest" if present else "missing"
+
+        if not present and key not in LEGACY_FAST_MANIFEST_DEFAULTS:
+            match = False
+            mismatch_reason = "missing_from_checkpoint_manifest"
+            message = f"{key}: missing from checkpoint manifest"
+        else:
+            match = configs_match(expected, actual)
+            mismatch_reason = None if match else "value_mismatch"
+            message = None if match else f"{key}: current={expected!r} checkpoint={actual!r}"
+
+        normalized_checkpoint_config[key] = json_safe_config_value(actual)
+        comparisons.append(
+            {
+                "key": key,
+                "category": "path" if key in FAST_MODEL_CONFIG_PATH_KEYS else "architecture",
+                "current_value": json_safe_config_value(expected),
+                "checkpoint_value": json_safe_config_value(actual),
+                "checkpoint_raw_value": json_safe_config_value(raw_actual),
+                "checkpoint_value_source": value_source,
+                "match": bool(match),
+                "mismatch_reason": mismatch_reason,
+                "message": message,
+            }
+        )
+
+    mismatches = [dict(record) for record in comparisons if not bool(record["match"])]
+    architecture_comparisons = [record for record in comparisons if record["category"] == "architecture"]
+    path_comparisons = [record for record in comparisons if record["category"] == "path"]
+    return {
+        "manifest_path": str(Path(manifest_path).resolve()),
+        "manifest_present": bool(manifest_present),
+        "checkpoint_run_status": checkpoint_manifest.get("run_status") if manifest_present else None,
+        "inference_model_config": json_safe_config_value(current),
+        "normalized_checkpoint_model_config": normalized_checkpoint_config,
+        "path_keys": sorted(FAST_MODEL_CONFIG_PATH_KEYS),
+        "comparison_count": len(comparisons),
+        "mismatch_count": len(mismatches),
+        "matches": not mismatches,
+        "architecture_matches": all(bool(record["match"]) for record in architecture_comparisons),
+        "artifact_paths_match": all(bool(record["match"]) for record in path_comparisons),
+        "comparisons": comparisons,
+        "mismatches": mismatches,
+    }
 
 
 def current_fast_model_config(args) -> dict[str, object]:
@@ -430,9 +611,37 @@ def current_fast_model_config(args) -> dict[str, object]:
         "response_delta_detach": args.response_delta_detach,
         "delta_logit_scale": args.delta_logit_scale,
         "delta_logit_learnable": args.delta_logit_learnable,
+        "response_trajectory_mode": args.response_trajectory_mode,
+        "response_trajectory_dim": args.response_trajectory_dim,
+        "response_trajectory_seed": args.response_trajectory_seed,
+        "response_trajectory_detach": args.response_trajectory_detach,
+        "trajectory_logit_scale": args.trajectory_logit_scale,
+        "trajectory_logit_learnable": args.trajectory_logit_learnable,
+        "cell_llm_mode": args.cell_llm_mode,
+        "cell_llm_fusion_mode": args.cell_llm_fusion_mode,
+        "cell_llm_condition_scale": args.cell_llm_condition_scale,
+        "cell_llm_logit_scale": args.cell_llm_logit_scale,
+        "cell_llm_dropout": args.cell_llm_dropout,
+        "cell_llm_embedding_path": args.cell_llm_embedding_path_resolved,
+        "cell_llm_feature_dim": args.cell_llm_feature_dim,
         "cell_type_llm_mode": args.cell_type_llm_mode,
+        "cell_type_llm_fusion_mode": args.cell_type_llm_fusion_mode,
+        "cell_type_llm_condition_scale": args.cell_type_llm_condition_scale,
+        "cell_type_llm_logit_scale": args.cell_type_llm_logit_scale,
+        "cell_type_llm_dropout": args.cell_type_llm_dropout,
         "cell_type_llm_embedding_path": args.cell_type_llm_embedding_path_resolved,
         "cell_type_llm_feature_dim": args.cell_type_llm_feature_dim,
+        "control_drug_interaction_mode": args.control_drug_interaction_mode,
+        "control_drug_interaction_scale": args.control_drug_interaction_scale,
+        "control_drug_logit_scale": args.control_drug_logit_scale,
+        "observed_perturb_expression_mode": args.observed_perturb_expression_mode,
+        "observed_perturb_expression_scale": args.observed_perturb_expression_scale,
+        "observed_perturb_logit_scale": args.observed_perturb_logit_scale,
+        "cell_prior_mode": args.cell_prior_mode,
+        "cell_prior_k": args.cell_prior_k,
+        "cell_prior_temperature": args.cell_prior_temperature,
+        "cell_prior_logit_scale": args.cell_prior_logit_scale,
+        "cell_prior_fixed_logit_scale": args.cell_prior_fixed_logit_scale,
         "batch_cov_list": args.batch_cov_list,
         "hidden_dim": args.hidden_dim,
         "expression_latent_dim": args.expression_latent_dim,
@@ -447,6 +656,8 @@ def current_fast_model_config(args) -> dict[str, object]:
         "init_delta_scale": args.init_delta_scale,
         "zero_init_delta_head": args.zero_init_delta_head,
         "control_expression_dropout": args.control_expression_dropout,
+        "control_expression_mode": args.control_expression_mode,
+        "random_control_expression_path": getattr(args, "random_control_expression_path_resolved", None),
     }
 
 
@@ -459,11 +670,25 @@ def validate_fast_checkpoint_config(
 ) -> dict[str, object]:
     manifest_path = infer_checkpoint_manifest_path(args.checkpoint_path)
     if not manifest_path.exists():
+        args.fast_checkpoint_config_validation = compare_fast_checkpoint_config(
+            current_fast_model_config(args),
+            {},
+            manifest_path=manifest_path,
+            manifest_present=False,
+        )
         if allow_missing_manifest:
             print(f"[checkpoint] WARNING missing checkpoint run_manifest.json: {manifest_path}")
             return {}
         raise FileNotFoundError(f"missing checkpoint run_manifest.json next to checkpoint: {manifest_path}")
     manifest = load_json(manifest_path)
+    current = current_fast_model_config(args)
+    validation = compare_fast_checkpoint_config(
+        current,
+        manifest,
+        manifest_path=manifest_path,
+        manifest_present=True,
+    )
+    args.fast_checkpoint_config_validation = validation
     run_status = manifest.get("run_status")
     if run_status != "fit_completed":
         message = f"checkpoint run_manifest.json is not fit_completed: run_status={run_status!r}"
@@ -471,17 +696,7 @@ def validate_fast_checkpoint_config(
             print(f"[checkpoint] WARNING {message}")
         else:
             raise ValueError(message)
-    current = current_fast_model_config(args)
-    mismatches: list[str] = []
-    for key, expected in current.items():
-        if key not in manifest:
-            if key in LEGACY_FAST_MANIFEST_DEFAULTS and configs_match(expected, LEGACY_FAST_MANIFEST_DEFAULTS[key]):
-                continue
-            mismatches.append(f"{key}: missing from checkpoint manifest")
-            continue
-        actual = manifest[key]
-        if not configs_match(expected, actual):
-            mismatches.append(f"{key}: current={expected!r} checkpoint={actual!r}")
+    mismatches = [str(record["message"]) for record in validation["mismatches"]]
     if not mismatches:
         return manifest
     message = "checkpoint config mismatch:\n  " + "\n  ".join(mismatches)
@@ -568,6 +783,37 @@ def fast_checkpoint_covariate_known_values(
     return known
 
 
+def build_fast_inference_cell_prior_features(
+    *,
+    args,
+    artifacts: FastTrainingReadyArtifacts,
+    checkpoint_manifest: dict[str, object],
+    row_to_set: dict[int, int],
+    split_dir: str | None,
+) -> tuple[np.ndarray | None, dict[str, Any]]:
+    if str(args.cell_prior_mode).lower() == "off":
+        return None, {"mode": "off", "feature_dim": 0}
+    split_summary = checkpoint_manifest.get("split_summary") or {}
+    checkpoint_split_dir = split_summary.get("split_dir") if isinstance(split_summary, dict) else None
+    prior_split_dir = Path(str(checkpoint_split_dir or split_dir)) if (checkpoint_split_dir or split_dir) else None
+    prior_split_strategy = str(checkpoint_manifest.get("split_strategy") or args.split_strategy or "")
+    if prior_split_dir is None or not prior_split_strategy:
+        raise ValueError("cell prior inference requires checkpoint split_dir and split_strategy")
+    train_indices = load_fast_indices(prior_split_dir, "train", prior_split_strategy)
+    train_set_info = load_fast_set_info(prior_split_dir, "train", prior_split_strategy)
+    valid_set_info = load_fast_set_info(prior_split_dir, "valid", prior_split_strategy)
+    test_set_info = load_fast_set_info(prior_split_dir, "test", prior_split_strategy)
+    return build_fast_cell_prior_features(
+        args=args,
+        artifacts=artifacts,
+        train_indices=train_indices,
+        row_to_set=row_to_set,
+        train_set_info=train_set_info,
+        valid_set_info=valid_set_info,
+        test_set_info=test_set_info,
+    )
+
+
 def run_fast_inference(args) -> None:
     started_at = iso_now()
     training_ready_root = Path(args.training_ready_root)
@@ -586,6 +832,13 @@ def run_fast_inference(args) -> None:
     args.pdi_matrix_path_resolved = str(pdi_matrix_path.resolve())
     args.ddi_matrix_path_resolved = str(ddi_matrix_path.resolve())
     args.ordered_protein_index_path = str((task_dir / "feature_ordered_protein_index.json").resolve())
+    args.control_expression_mode = str(args.control_expression_mode).lower()
+    args.random_control_expression_path_resolved = (
+        resolve_random_control_expression_path(args.random_control_expression_path)
+        if args.control_expression_mode == "random_saved"
+        else None
+    )
+    resolve_cell_llm_embedding_path(args, training_ready_root, args.dataset_group)
     resolve_cell_type_llm_embedding_path(args, training_ready_root, args.dataset_group)
     args.effective_key1 = args.effective_key1 or infer_label_key(args.task_name)
     task_loss_config = resolve_task_loss_config(
@@ -603,11 +856,17 @@ def run_fast_inference(args) -> None:
     artifacts = FastTrainingReadyArtifacts.load(task_dir, meta_path)
     protein_embedding = load_fast_embedding_matrix(protein_embedding_path)
     drug_embedding = load_fast_embedding_matrix(drug_embedding_path)
-    cell_type_feature_matrix, cell_type_llm_summary = load_fast_cell_type_llm_features(
+    cell_type_feature_matrix, cell_llm_summary = load_fast_cell_llm_features(
         args=args,
         artifacts=artifacts,
         training_ready_root=training_ready_root,
     )
+    cell_type_llm_feature_matrix, cell_type_llm_summary = load_fast_cell_type_llm_features(
+        args=args,
+        artifacts=artifacts,
+        training_ready_root=training_ready_root,
+    )
+    args.cell_llm_feature_dim = int(cell_llm_summary.get("feature_dim", 0))
     args.cell_type_llm_feature_dim = int(cell_type_llm_summary.get("feature_dim", 0))
     checkpoint_manifest = validate_fast_checkpoint_config(
         args,
@@ -647,8 +906,16 @@ def run_fast_inference(args) -> None:
         ordered_protein_index=checkpoint_axis,
         cache_task_name=str(checkpoint_manifest.get("task_name") or args.task_name),
     )
-    ddi_matrix = np.load(ddi_matrix_path, mmap_mode="r") if args.use_ddi else None
+    ddi_matrix = safe_np_load(ddi_matrix_path, mmap_mode="r") if args.use_ddi else None
     indices, row_to_set, set_info, split_dir = resolve_fast_inference_indices(args, artifacts)
+    random_control_expression_matrix, random_control_expression_summary = load_random_control_expression_matrix(args, artifacts)
+    prior_feature_matrix, prior_summary = build_fast_inference_cell_prior_features(
+        args=args,
+        artifacts=artifacts,
+        checkpoint_manifest=checkpoint_manifest,
+        row_to_set=row_to_set,
+        split_dir=split_dir,
+    )
     covariate_unknown_indices = fast_checkpoint_covariate_unknown_indices(
         checkpoint_manifest,
         artifacts.meta,
@@ -672,7 +939,11 @@ def run_fast_inference(args) -> None:
         expression_column_index=expression_column_index,
         covariate_known_values=covariate_known_values,
         covariate_unknown_indices=covariate_unknown_indices,
+        prior_feature_matrix=prior_feature_matrix,
         cell_type_feature_matrix=cell_type_feature_matrix,
+        cell_type_llm_feature_matrix=cell_type_llm_feature_matrix,
+        control_expression_mode=args.control_expression_mode,
+        random_control_expression_matrix=random_control_expression_matrix,
     )
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
     model = FastDeltaDrugResponseModel(
@@ -728,7 +999,31 @@ def run_fast_inference(args) -> None:
         response_delta_detach=args.response_delta_detach,
         delta_logit_scale=args.delta_logit_scale,
         delta_logit_learnable=args.delta_logit_learnable,
-        cell_type_feature_dim=args.cell_type_llm_feature_dim,
+        response_trajectory_mode=args.response_trajectory_mode,
+        response_trajectory_dim=args.response_trajectory_dim,
+        response_trajectory_seed=args.response_trajectory_seed,
+        response_trajectory_detach=args.response_trajectory_detach,
+        trajectory_logit_scale=args.trajectory_logit_scale,
+        trajectory_logit_learnable=args.trajectory_logit_learnable,
+        cell_type_feature_dim=args.cell_llm_feature_dim,
+        cell_type_fusion_mode=args.cell_llm_fusion_mode,
+        cell_type_condition_scale=args.cell_llm_condition_scale,
+        cell_type_logit_scale=args.cell_llm_logit_scale,
+        cell_type_dropout=args.cell_llm_dropout,
+        cell_type_llm_feature_dim=args.cell_type_llm_feature_dim,
+        cell_type_llm_fusion_mode=args.cell_type_llm_fusion_mode,
+        cell_type_llm_condition_scale=args.cell_type_llm_condition_scale,
+        cell_type_llm_logit_scale=args.cell_type_llm_logit_scale,
+        cell_type_llm_dropout=args.cell_type_llm_dropout,
+        control_drug_interaction_mode=args.control_drug_interaction_mode,
+        control_drug_interaction_scale=args.control_drug_interaction_scale,
+        control_drug_logit_scale=args.control_drug_logit_scale,
+        observed_perturb_expression_mode=args.observed_perturb_expression_mode,
+        observed_perturb_expression_scale=args.observed_perturb_expression_scale,
+        observed_perturb_logit_scale=args.observed_perturb_logit_scale,
+        prior_feature_dim=int(prior_summary.get("feature_dim", 0)),
+        prior_logit_scale=args.cell_prior_logit_scale,
+        prior_fixed_logit_scale=args.cell_prior_fixed_logit_scale,
         use_ddi=args.use_ddi,
         residual_expression=args.residual_expression,
         init_delta_scale=args.init_delta_scale,
@@ -781,9 +1076,17 @@ def run_fast_inference(args) -> None:
     true2 = np.concatenate(true2_chunks) if true2_chunks else np.asarray([], dtype=np.float32)
     mask1 = np.concatenate(mask1_chunks) if mask1_chunks else np.asarray([], dtype=np.float32)
     mask2 = np.concatenate(mask2_chunks) if mask2_chunks else np.asarray([], dtype=np.float32)
-    active_prob = pred_prob2 if task_loss_config["task_head"] == "synergy" else pred_prob1
-    active_true = true2 if task_loss_config["task_head"] == "synergy" else true1
-    active_mask = mask2 if task_loss_config["task_head"] == "synergy" else mask1
+    if task_loss_config["task_head"] == "unified":
+        pred_prob2 = pred_prob1.copy()
+    active_prob, active_true, active_mask = active_prediction_arrays(
+        task_loss_config["task_head"],
+        true1=true1,
+        prob1=pred_prob1,
+        mask1=mask1,
+        true2=true2,
+        prob2=pred_prob2,
+        mask2=mask2,
+    )
     feature_row_indices = (
         np.concatenate(row_index_chunks).astype(np.int64, copy=False)
         if row_index_chunks
@@ -806,7 +1109,15 @@ def run_fast_inference(args) -> None:
             "pred_task_prob": active_prob,
             "pred_response_prob": pred_prob1,
             "pred_synergy_prob": pred_prob2,
-            "task_label": rows.get(task_loss_config["task_label_key"], pd.Series([None] * len(rows))).tolist(),
+            "task_label": task_label_values(
+                rows,
+                task_head=task_loss_config["task_head"],
+                task_label_key=task_loss_config["task_label_key"],
+                true1=true1,
+                mask1=mask1,
+                true2=true2,
+                mask2=mask2,
+            ),
             "response_label": rows.get(args.effective_key1, pd.Series([None] * len(rows))).tolist(),
             "synergy_label": rows.get(args.effective_key2, pd.Series([None] * len(rows))).tolist(),
         }
@@ -823,6 +1134,11 @@ def run_fast_inference(args) -> None:
             "task_head": task_loss_config["task_head"],
             "task_label_key": task_loss_config["task_label_key"],
             "task_mask_key": task_loss_config["task_mask_key"],
+            "task_label_policy": (
+                "unified_synergy_first_else_response"
+                if task_loss_config["task_head"] == "unified"
+                else "single_head"
+            ),
         }
     )
     metrics = {
@@ -865,6 +1181,7 @@ def run_fast_inference(args) -> None:
     checkpoint_axis_size = checkpoint_manifest.get("topk_genes")
     if checkpoint_axis_size is None and checkpoint_axis_path:
         checkpoint_axis_size = len(load_json(checkpoint_axis_path))
+    checkpoint_config_validation = getattr(args, "fast_checkpoint_config_validation", {})
     dump_json(
         output_dir / "run_manifest.json",
         {
@@ -887,17 +1204,55 @@ def run_fast_inference(args) -> None:
             "checkpoint_split_strategy": checkpoint_manifest.get("split_strategy"),
             "checkpoint_ordered_protein_index_path": checkpoint_axis_path,
             "checkpoint_protein_axis_size": checkpoint_axis_size,
+            "inference_model_config": checkpoint_config_validation.get("inference_model_config", {}),
+            "checkpoint_config_validation": checkpoint_config_validation,
+            "checkpoint_config_mismatches": checkpoint_config_validation.get("mismatches", []),
+            "checkpoint_config_matches": bool(checkpoint_config_validation.get("matches", False)),
+            "checkpoint_architecture_matches": bool(
+                checkpoint_config_validation.get("architecture_matches", False)
+            ),
+            "checkpoint_artifact_paths_match": bool(
+                checkpoint_config_validation.get("artifact_paths_match", False)
+            ),
             "protein_axis_matches_checkpoint": bool(checkpoint_axis_size == int(artifacts.expression_matrix.shape[1])),
             "task_head": task_loss_config["task_head"],
             "task_label_key": task_loss_config["task_label_key"],
             "task_mask_key": task_loss_config["task_mask_key"],
+            "task_label_policy": (
+                "unified_synergy_first_else_response"
+                if task_loss_config["task_head"] == "unified"
+                else "single_head"
+            ),
             "batch_cov_list": list(args.batch_cov_list),
             "use_dose_covariate": bool(args.use_dose_covariate),
             "dose_covariate_fields": list(args.dose_covariate_fields),
+            "cell_llm_mode": args.cell_llm_mode,
+            "cell_llm_fusion_mode": args.cell_llm_fusion_mode,
+            "cell_llm_condition_scale": args.cell_llm_condition_scale,
+            "cell_llm_logit_scale": args.cell_llm_logit_scale,
+            "cell_llm_dropout": args.cell_llm_dropout,
+            "cell_llm_feature_dim": args.cell_llm_feature_dim,
+            "cell_llm_embedding_path": args.cell_llm_embedding_path_resolved,
+            "cell_llm_summary": cell_llm_summary,
             "cell_type_llm_mode": args.cell_type_llm_mode,
+            "cell_type_llm_fusion_mode": args.cell_type_llm_fusion_mode,
+            "cell_type_llm_condition_scale": args.cell_type_llm_condition_scale,
+            "cell_type_llm_logit_scale": args.cell_type_llm_logit_scale,
+            "cell_type_llm_dropout": args.cell_type_llm_dropout,
             "cell_type_llm_feature_dim": args.cell_type_llm_feature_dim,
             "cell_type_llm_embedding_path": args.cell_type_llm_embedding_path_resolved,
             "cell_type_llm_summary": cell_type_llm_summary,
+            "control_drug_interaction_mode": args.control_drug_interaction_mode,
+            "control_drug_interaction_scale": args.control_drug_interaction_scale,
+            "control_drug_logit_scale": args.control_drug_logit_scale,
+            "observed_perturb_expression_mode": args.observed_perturb_expression_mode,
+            "observed_perturb_expression_scale": args.observed_perturb_expression_scale,
+            "observed_perturb_logit_scale": args.observed_perturb_logit_scale,
+            "control_expression_mode": args.control_expression_mode,
+            "random_control_expression_path": getattr(args, "random_control_expression_path_resolved", None),
+            "random_control_expression_summary": random_control_expression_summary,
+            "checkpoint_control_expression_mode": checkpoint_manifest.get("control_expression_mode"),
+            "checkpoint_random_control_expression_path": checkpoint_manifest.get("random_control_expression_path"),
             "prediction_path": str(prediction_path),
             "n_predictions": int(len(prediction_df)),
             "save_expression_pred": bool(args.save_expression_pred),
@@ -971,7 +1326,7 @@ def main() -> None:
     parser.add_argument("--gene-emb-dim", type=int, default=768)
     parser.add_argument("--effective-key1", default=None)
     parser.add_argument("--effective-key2", default="synergy")
-    parser.add_argument("--task-head", choices=["auto", "response", "synergy"], default="auto")
+    parser.add_argument("--task-head", choices=["auto", "response", "synergy", "unified"], default="auto")
     parser.add_argument("--task-label-key", default=None)
     parser.add_argument("--task-mask-key", default=None)
     parser.add_argument(
@@ -1059,6 +1414,37 @@ def main() -> None:
     parser.add_argument("--response-delta-detach", action="store_true")
     parser.add_argument("--delta-logit-scale", type=float, default=0.0)
     parser.add_argument("--delta-logit-learnable", action="store_true")
+    parser.add_argument("--response-trajectory-mode", choices=["off", "summary", "drug", "gate"], default="off")
+    parser.add_argument("--response-trajectory-dim", type=int, default=64)
+    parser.add_argument("--response-trajectory-seed", type=int, default=37)
+    parser.add_argument("--response-trajectory-detach", action="store_true")
+    parser.add_argument("--trajectory-logit-scale", type=float, default=0.0)
+    parser.add_argument("--trajectory-logit-learnable", action="store_true")
+    parser.add_argument(
+        "--cell-llm-mode",
+        choices=["off", "frozen"],
+        default="off",
+        help="Use frozen LLM-derived Cell text embeddings as continuous covariates.",
+    )
+    parser.add_argument(
+        "--cell-llm-embedding-path",
+        default=None,
+        help="Path to Cell LLM embedding .npz; defaults to the dataset group's generated artifact.",
+    )
+    parser.add_argument(
+        "--cell-llm-index-column",
+        default="Cell_index",
+        help="Feature-table column used to index rows in the Cell LLM embedding artifact.",
+    )
+    parser.add_argument(
+        "--cell-llm-fusion-mode",
+        choices=["off", "covariate", "piece", "film", "interaction", "hybrid"],
+        default="covariate",
+        help="How frozen Cell LLM features condition the fast model.",
+    )
+    parser.add_argument("--cell-llm-condition-scale", type=float, default=0.0)
+    parser.add_argument("--cell-llm-logit-scale", type=float, default=0.0)
+    parser.add_argument("--cell-llm-dropout", type=float, default=0.0)
     parser.add_argument(
         "--cell-type-llm-mode",
         choices=["off", "frozen"],
@@ -1068,13 +1454,50 @@ def main() -> None:
     parser.add_argument(
         "--cell-type-llm-embedding-path",
         default=None,
-        help="Path to cell_type LLM embedding .npz; defaults to data/training_ready/<group>/derived/cell_type_llm_embedding_qwen3_4096.npz.",
+        help="Path to cell_type LLM embedding .npz; defaults to the group derived artifact (PTV1 v3, others v2).",
     )
+    parser.add_argument(
+        "--cell-type-llm-index-column",
+        default="cell_type_index",
+        help="Feature-table column used to index rows in the cell_type LLM embedding artifact.",
+    )
+    parser.add_argument(
+        "--cell-type-llm-fusion-mode",
+        choices=["off", "covariate", "piece", "film", "interaction", "hybrid"],
+        default="covariate",
+        help="How frozen cell_type LLM features condition the fast model.",
+    )
+    parser.add_argument("--cell-type-llm-condition-scale", type=float, default=0.0)
+    parser.add_argument("--cell-type-llm-logit-scale", type=float, default=0.0)
+    parser.add_argument("--cell-type-llm-dropout", type=float, default=0.0)
+    parser.add_argument("--control-drug-interaction-mode", choices=["off", "full"], default="off")
+    parser.add_argument("--control-drug-interaction-scale", type=float, default=0.0)
+    parser.add_argument("--control-drug-logit-scale", type=float, default=0.0)
+    parser.add_argument("--observed-perturb-expression-mode", choices=["off", "perturb", "delta"], default="off")
+    parser.add_argument("--observed-perturb-expression-scale", type=float, default=0.0)
+    parser.add_argument("--observed-perturb-logit-scale", type=float, default=0.0)
+    parser.add_argument("--cell-prior-mode", choices=["off", "knn_drug"], default="off")
+    parser.add_argument("--cell-prior-k", type=int, default=8)
+    parser.add_argument("--cell-prior-temperature", type=float, default=0.2)
+    parser.add_argument("--cell-prior-chunk-size", type=int, default=512)
+    parser.add_argument("--cell-prior-logit-scale", type=float, default=0.0)
+    parser.add_argument("--cell-prior-fixed-logit-scale", type=float, default=0.0)
     parser.add_argument("--use-ddi", action="store_true")
     parser.add_argument("--absolute-expression-head", action="store_false", dest="residual_expression")
     parser.add_argument("--init-delta-scale", type=float, default=0.1)
     parser.add_argument("--zero-init-delta-head", action="store_true")
     parser.add_argument("--control-expression-dropout", type=float, default=0.0)
+    parser.add_argument(
+        "--control-expression-mode",
+        choices=["real", "random_saved"],
+        default="real",
+        help="Use the paired real control row or a saved random control proteome aligned by feature row index.",
+    )
+    parser.add_argument(
+        "--random-control-expression-path",
+        default=None,
+        help="Path to random_control_expression_seed*.npy when --control-expression-mode random_saved is used.",
+    )
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--limit-batches", type=int, default=None, help="Optional smoke-test cap on inference batches")
@@ -1106,6 +1529,8 @@ def main() -> None:
     if args.model_type == FAST_DELTA_MODEL_NAME:
         run_fast_inference(args)
         return
+    if args.control_expression_mode != "real":
+        raise ValueError("--control-expression-mode random_saved is only supported with --model-type fast_delta")
 
     training_ready_root = Path(args.training_ready_root)
     task_dir = training_ready_root / args.dataset_group / "tasks" / args.task_name
@@ -1241,9 +1666,17 @@ def main() -> None:
     true2 = np.concatenate(true2_chunks) if true2_chunks else np.asarray([], dtype=np.float32)
     mask1 = np.concatenate(mask1_chunks) if mask1_chunks else np.asarray([], dtype=np.float32)
     mask2 = np.concatenate(mask2_chunks) if mask2_chunks else np.asarray([], dtype=np.float32)
-    active_prob = pred_prob2 if task_loss_config["task_head"] == "synergy" else pred_prob1
-    active_true = true2 if task_loss_config["task_head"] == "synergy" else true1
-    active_mask = mask2 if task_loss_config["task_head"] == "synergy" else mask1
+    if task_loss_config["task_head"] == "unified":
+        pred_prob2 = pred_prob1.copy()
+    active_prob, active_true, active_mask = active_prediction_arrays(
+        task_loss_config["task_head"],
+        true1=true1,
+        prob1=pred_prob1,
+        mask1=mask1,
+        true2=true2,
+        prob2=pred_prob2,
+        mask2=mask2,
+    )
     feature_row_indices = (
         np.concatenate(row_index_chunks).astype(np.int64, copy=False)
         if row_index_chunks
@@ -1266,7 +1699,15 @@ def main() -> None:
             "pred_task_prob": active_prob,
             "pred_response_prob": pred_prob1,
             "pred_synergy_prob": pred_prob2,
-            "task_label": rows.get(task_loss_config["task_label_key"], pd.Series([None] * len(rows))).tolist(),
+            "task_label": task_label_values(
+                rows,
+                task_head=task_loss_config["task_head"],
+                task_label_key=task_loss_config["task_label_key"],
+                true1=true1,
+                mask1=mask1,
+                true2=true2,
+                mask2=mask2,
+            ),
             "response_label": rows.get(args.effective_key1, pd.Series([None] * len(rows))).tolist(),
             "synergy_label": rows.get(args.effective_key2, pd.Series([None] * len(rows))).tolist(),
         }
@@ -1291,6 +1732,11 @@ def main() -> None:
             "task_head": task_loss_config["task_head"],
             "task_label_key": task_loss_config["task_label_key"],
             "task_mask_key": task_loss_config["task_mask_key"],
+            "task_label_policy": (
+                "unified_synergy_first_else_response"
+                if task_loss_config["task_head"] == "unified"
+                else "single_head"
+            ),
         }
     )
     metrics = {
@@ -1356,6 +1802,11 @@ def main() -> None:
             "task_head": task_loss_config["task_head"],
             "task_label_key": task_loss_config["task_label_key"],
             "task_mask_key": task_loss_config["task_mask_key"],
+            "task_label_policy": (
+                "unified_synergy_first_else_response"
+                if task_loss_config["task_head"] == "unified"
+                else "single_head"
+            ),
             "batch_cov_list": list(args.batch_cov_list),
             "use_dose_covariate": bool(args.use_dose_covariate),
             "dose_covariate_fields": list(args.dose_covariate_fields),

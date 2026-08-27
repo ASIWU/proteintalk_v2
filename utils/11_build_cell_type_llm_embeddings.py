@@ -48,7 +48,7 @@ def load_env_file(path: Path) -> None:
 
 
 def sanitize_proxy_env() -> dict[str, Any]:
-    """Prefer proxy_on2's HTTP(S) proxy if ALL_PROXY is SOCKS and socksio is absent."""
+    """Prefer proxy_on/proxy_on2 HTTP(S) proxy if ALL_PROXY is SOCKS and socksio is absent."""
 
     all_proxy = os.environ.get("ALL_PROXY") or os.environ.get("all_proxy")
     socks_missing = importlib.util.find_spec("socksio") is None
@@ -92,6 +92,8 @@ def collect_cell_type_records(training_ready_root: Path, dataset_group: str) -> 
     meta_path = training_ready_root / dataset_group / "global_meta.json"
     meta = load_json(meta_path)
     mapping = meta["value_to_index"]["cell_type"]
+    if int(mapping.get("no", -1)) != 0:
+        raise ValueError('global_meta value_to_index["cell_type"] must reserve index 0 for "no"')
     records: dict[int, dict[str, Any]] = {}
     for name, index in mapping.items():
         records[int(index)] = {
@@ -109,10 +111,18 @@ def collect_cell_type_records(training_ready_root: Path, dataset_group: str) -> 
         df = read_feature_table(task_dir)
         if "cell_type" not in df.columns:
             continue
-        for raw_value in df["cell_type"].tolist():
-            canonical = canonicalize_text_value(raw_value)
-            index = mapping.get(canonical, mapping.get("no", 0))
-            record = records[int(index)]
+        index_values = None
+        if "cell_type_index" in df.columns:
+            index_values = pd.to_numeric(df["cell_type_index"], errors="coerce").fillna(0).astype(int).tolist()
+        for row_offset, raw_value in enumerate(df["cell_type"].tolist()):
+            if index_values is None:
+                canonical = canonicalize_text_value(raw_value)
+                index = int(mapping.get(canonical, mapping.get("no", 0)))
+            else:
+                index = int(index_values[row_offset])
+                if index not in records:
+                    raise ValueError(f"{task_dir}: cell_type_index={index} is not present in global mapping")
+            record = records[index]
             raw_text = "" if pd.isna(raw_value) else str(raw_value).strip()
             raw_key = raw_text or "no"
             record["raw_values"][raw_key] = int(record["raw_values"].get(raw_key, 0)) + 1
@@ -134,14 +144,30 @@ def display_name(canonical_name: str, raw_values: dict[str, int]) -> str:
     return canonical_name.lower().replace("_", " ")
 
 
-def description_prompt(record: dict[str, Any]) -> str:
+def description_prompt(record: dict[str, Any], dataset_group: str = "") -> str:
     name = display_name(str(record["canonical_name"]), record["raw_values"])
     variants = ", ".join(list(record["raw_values"])[:5]) or str(record["canonical_name"])
+    group = str(dataset_group).lower()
+    if group == "ptv1":
+        return (
+            "Write one concise biomedical description for a coarse cancer cell-type or tissue-lineage "
+            "label used to annotate PTV1 breast-cancer cell lines in drug-response proteomics. Describe "
+            "the breast cancer lineage, common molecular context, and why this tissue label may affect "
+            "drug perturbation response. Use 2-4 sentences, no bullets, and do not mention specific cell "
+            "lines.\n\n"
+            "Dataset context: PTV1 AIVC and extra single-drug breast-cancer proteomics.\n"
+            f"Cell-type label: {name}\n"
+            f"Observed labels: {variants}"
+        )
     return (
-        "Write one concise biomedical description for a cancer cell type used in drug response "
-        "proteomics experiments. Focus on tissue lineage, tumor context, common biological traits, "
-        "and why the cell type may matter for perturbation response. Use 2-4 sentences, no bullets. "
-        f"Cell type: {name}. Observed labels: {variants}."
+        "Write one concise biomedical description for a cancer cell type label used to annotate cancer "
+        "cell lines in drug-response proteomics experiments. Describe the tissue or lineage represented "
+        "by the label, common tumor biology and molecular context, and why this lineage may affect "
+        "perturbation response. Use 2-4 sentences, no bullets, and do not mention a specific cell line "
+        "unless it appears in the observed labels.\n\n"
+        "Dataset context: PTV3 protein response after single- and double-drug perturbations.\n"
+        f"Cell-type label: {name}\n"
+        f"Observed labels: {variants}"
     )
 
 
@@ -214,19 +240,20 @@ def build_embeddings(args: argparse.Namespace) -> None:
 
     for record in records:
         canonical = str(record["canonical_name"])
+        prompt = None if canonical == "no" else description_prompt(record, args.dataset_group)
         if canonical == "no":
             description = "Missing or unspecified cell type. Reserved zero-vector row."
         else:
             description = chat_completion_text(
                 client,
                 model=args.description_model,
-                prompt=description_prompt(record),
+                prompt=prompt or "",
                 retries=args.retries,
             )
         descriptions[str(record["index"])] = {
             **record,
             "description": description,
-            "prompt": None if canonical == "no" else description_prompt(record),
+            "prompt": prompt,
         }
         print(f"[cell-type-llm] described index={record['index']} name={canonical}")
 
@@ -256,6 +283,8 @@ def build_embeddings(args: argparse.Namespace) -> None:
         "embedding_dim": embedding_dim,
         "cell_type_count": len(records),
         "nonzero_cell_type_count": len(embed_records),
+        "input_field": "cell_type",
+        "index_column": "cell_type_index",
         "normalized": bool(args.normalize_embeddings),
         "zero_index_reserved_for_no": True,
         "training_ready_root": str(Path(args.training_ready_root).resolve()),
@@ -281,7 +310,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset-group", default="ptv3")
     parser.add_argument(
         "--output",
-        default=str(DEFAULT_TRAINING_READY_ROOT / "ptv3" / "derived" / "cell_type_llm_embedding_qwen3_4096.npz"),
+        default=str(DEFAULT_TRAINING_READY_ROOT / "ptv3" / "derived" / "cell_type_llm_embedding_qwen3_4096_v2.npz"),
     )
     parser.add_argument("--env-file", default=str(REPO_ROOT / ".env"))
     parser.add_argument("--description-model", default=DEFAULT_DESCRIPTION_MODEL)
